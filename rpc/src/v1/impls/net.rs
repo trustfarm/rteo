@@ -1,4 +1,4 @@
-// Copyright 2015, 2016 Ethcore (UK) Ltd.
+// Copyright 2015-2017 Parity Technologies (UK) Ltd.
 // This file is part of Parity.
 
 // Parity is free software: you can redistribute it and/or modify
@@ -15,41 +15,39 @@
 // along with Parity.  If not, see <http://www.gnu.org/licenses/>.
 
 //! Net rpc implementation.
-use std::sync::{Arc, Weak};
-use jsonrpc_core::*;
+use std::sync::Arc;
+use jsonrpc_core::Result;
 use ethsync::SyncProvider;
 use v1::traits::Net;
-use v1::helpers::params::expect_no_params;
 
 /// Net rpc implementation.
-pub struct NetClient<S: ?Sized> where S: SyncProvider {
-	sync: Weak<S>
+pub struct NetClient<S: ?Sized> {
+	sync: Arc<S>
 }
 
 impl<S: ?Sized> NetClient<S> where S: SyncProvider {
 	/// Creates new NetClient.
 	pub fn new(sync: &Arc<S>) -> Self {
 		NetClient {
-			sync: Arc::downgrade(sync)
+			sync: sync.clone(),
 		}
 	}
 }
 
 impl<S: ?Sized> Net for NetClient<S> where S: SyncProvider + 'static {
-	fn version(&self, params: Params) -> Result<Value, Error> {
-		try!(expect_no_params(params));
-		Ok(Value::String(format!("{}", take_weak!(self.sync).status().network_id).to_owned()))
+	fn version(&self) -> Result<String> {
+		Ok(format!("{}", self.sync.status().network_id).to_owned())
 	}
 
-	fn peer_count(&self, params: Params) -> Result<Value, Error> {
-		try!(expect_no_params(params));
-		Ok(Value::String(format!("0x{:x}", take_weak!(self.sync).status().num_peers as u64).to_owned()))
+	fn peer_count(&self) -> Result<String> {
+		Ok(format!("0x{:x}", self.sync.status().num_peers as u64).to_owned())
 	}
 
-	fn is_listening(&self, params: Params) -> Result<Value, Error> {
-		try!(expect_no_params(params));
+	fn is_listening(&self) -> Result<bool> {
 		// right now (11 march 2016), we are always listening for incoming connections
-		Ok(Value::Bool(true))
+		//
+		// (this may not be true now -- 26 september 2016)
+		Ok(true)
 	}
 
 }

@@ -1,4 +1,4 @@
-// Copyright 2015, 2016 Ethcore (UK) Ltd.
+// Copyright 2015-2017 Parity Technologies (UK) Ltd.
 // This file is part of Parity.
 
 // Parity is free software: you can redistribute it and/or modify
@@ -16,26 +16,21 @@
 
 //! RPC interface.
 
-use std::sync::Arc;
-use jsonrpc_core::*;
+use std::collections::BTreeMap;
 
-/// RPC Interface.
-pub trait Rpc: Sized + Send + Sync + 'static {
+use jsonrpc_core::Result;
 
-	/// Returns supported modules for Geth 1.3.6
-	fn modules(&self, _: Params) -> Result<Value, Error>;
+build_rpc_trait! {
+	/// RPC Interface.
+	pub trait Rpc {
+		/// Returns supported modules for Geth 1.3.6
+        /// @ignore
+		#[rpc(name = "modules")]
+		fn modules(&self) -> Result<BTreeMap<String, String>>;
 
-	/// Returns supported modules for Geth 1.4.0
-	fn rpc_modules(&self, _: Params) -> Result<Value, Error>;
-
-	/// Should be used to convert object to io delegate.
-	fn to_delegate(self) -> IoDelegate<Self> {
-		let mut delegate = IoDelegate::new(Arc::new(self));
-		// Geth 1.3.6 compatibility
-		delegate.add_method("modules", Rpc::modules);
-		// Geth 1.4.0 compatibility
-		delegate.add_method("rpc_modules", Rpc::rpc_modules);
-		delegate
+		/// Returns supported modules for Geth 1.4.0
+        /// @ignore
+		#[rpc(name = "rpc_modules")]
+		fn rpc_modules(&self) -> Result<BTreeMap<String, String>>;
 	}
 }
-

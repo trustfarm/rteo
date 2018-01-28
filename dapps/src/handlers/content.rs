@@ -1,4 +1,4 @@
-// Copyright 2015, 2016 Ethcore (UK) Ltd.
+// Copyright 2015-2017 Parity Technologies (UK) Ltd.
 // This file is part of Parity.
 
 // Parity is free software: you can redistribute it and/or modify
@@ -16,94 +16,73 @@
 
 //! Simple Content Handler
 
-use std::io::Write;
-use hyper::{header, server, Decoder, Encoder, Next};
-use hyper::net::HttpStream;
-use hyper::status::StatusCode;
+use hyper::{self, mime, header};
+use hyper::StatusCode;
 
-use util::version;
+use parity_version::version;
 
-#[derive(Clone)]
+use handlers::add_security_headers;
+use Embeddable;
+
+#[derive(Debug, Clone)]
 pub struct ContentHandler {
 	code: StatusCode,
 	content: String,
-	mimetype: String,
-	write_pos: usize,
+	mimetype: mime::Mime,
+	safe_to_embed_on: Embeddable,
 }
 
 impl ContentHandler {
-	pub fn ok(content: String, mimetype: String) -> Self {
-		ContentHandler {
-			code: StatusCode::Ok,
-			content: content,
-			mimetype: mimetype,
-			write_pos: 0
-		}
+	pub fn ok(content: String, mimetype: mime::Mime) -> Self {
+		Self::new(StatusCode::Ok, content, mimetype)
 	}
 
-	pub fn not_found(content: String, mimetype: String) -> Self {
-		ContentHandler {
-			code: StatusCode::NotFound,
-			content: content,
-			mimetype: mimetype,
-			write_pos: 0
-		}
+	pub fn html(code: StatusCode, content: String, embeddable_on: Embeddable) -> Self {
+		Self::new_embeddable(code, content, mime::TEXT_HTML, embeddable_on)
 	}
 
-	pub fn html(code: StatusCode, content: String) -> Self {
-		Self::new(code, content, "text/html".into())
-	}
-
-	pub fn error(code: StatusCode, title: &str, message: &str, details: Option<&str>) -> Self {
+	pub fn error(
+		code: StatusCode,
+		title: &str,
+		message: &str,
+		details: Option<&str>,
+		embeddable_on: Embeddable,
+	) -> Self {
 		Self::html(code, format!(
 			include_str!("../error_tpl.html"),
 			title=title,
 			message=message,
 			details=details.unwrap_or_else(|| ""),
 			version=version(),
-		))
+		), embeddable_on)
 	}
 
-	pub fn new(code: StatusCode, content: String, mimetype: String) -> Self {
+	pub fn new(code: StatusCode, content: String, mimetype: mime::Mime) -> Self {
+		Self::new_embeddable(code, content, mimetype, None)
+	}
+
+	pub fn new_embeddable(
+		code: StatusCode,
+		content: String,
+		mimetype: mime::Mime,
+		safe_to_embed_on: Embeddable,
+	) -> Self {
 		ContentHandler {
-			code: code,
-			content: content,
-			mimetype: mimetype,
-			write_pos: 0,
+			code,
+			content,
+			mimetype,
+			safe_to_embed_on,
 		}
 	}
 }
 
-impl server::Handler<HttpStream> for ContentHandler {
-	fn on_request(&mut self, _request: server::Request<HttpStream>) -> Next {
-		Next::write()
-	}
-
-	fn on_request_readable(&mut self, _decoder: &mut Decoder<HttpStream>) -> Next {
-		Next::write()
-	}
-
-	fn on_response(&mut self, res: &mut server::Response) -> Next {
-		res.set_status(self.code);
-		res.headers_mut().set(header::ContentType(self.mimetype.parse().unwrap()));
-		Next::write()
-	}
-
-	fn on_response_writable(&mut self, encoder: &mut Encoder<HttpStream>) -> Next {
-		let bytes = self.content.as_bytes();
-		if self.write_pos == bytes.len() {
-			return Next::end();
-		}
-
-		match encoder.write(&bytes[self.write_pos..]) {
-			Ok(bytes) => {
-				self.write_pos += bytes;
-				Next::write()
-			},
-			Err(e) => match e.kind() {
-				::std::io::ErrorKind::WouldBlock => Next::write(),
-				_ => Next::end()
-			},
-		}
+impl Into<hyper::Response> for ContentHandler {
+	fn into(self) -> hyper::Response {
+		let mut res = hyper::Response::new()
+			.with_status(self.code)
+			.with_header(header::ContentType(self.mimetype))
+			.with_body(self.content);
+		add_security_headers(&mut res.headers_mut(), self.safe_to_embed_on);
+		res
 	}
 }

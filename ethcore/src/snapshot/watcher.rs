@@ -1,4 +1,4 @@
-// Copyright 2015, 2016 Ethcore (UK) Ltd.
+// Copyright 2015-2017 Parity Technologies (UK) Ltd.
 // This file is part of Parity.
 
 // Parity is free software: you can redistribute it and/or modify
@@ -16,13 +16,14 @@
 
 //! Watcher for snapshot-related chain events.
 
+use parking_lot::Mutex;
 use client::{BlockChainClient, Client, ChainNotify};
-use ids::BlockID;
+use ids::BlockId;
 use service::ClientIoMessage;
-use views::HeaderView;
 
 use io::IoChannel;
-use util::hash::H256;
+use ethereum_types::H256;
+use bytes::Bytes;
 
 use std::sync::Arc;
 
@@ -30,7 +31,7 @@ use std::sync::Arc;
 trait Oracle: Send + Sync {
 	fn to_number(&self, hash: H256) -> Option<u64>;
 
-	fn is_major_syncing(&self) -> bool;
+	fn is_major_importing(&self) -> bool;
 }
 
 struct StandardOracle<F> where F: 'static + Send + Sync + Fn() -> bool {
@@ -42,13 +43,11 @@ impl<F> Oracle for StandardOracle<F>
 	where F: Send + Sync + Fn() -> bool
 {
 	fn to_number(&self, hash: H256) -> Option<u64> {
-		self.client.block_header(BlockID::Hash(hash)).map(|h| HeaderView::new(&h).number())
+		self.client.block_header(BlockId::Hash(hash)).map(|h| h.number())
 	}
 
-	fn is_major_syncing(&self) -> bool {
-		let queue_info = self.client.queue_info();
-
-		(self.sync_status)() || queue_info.unverified_queue_size + queue_info.verified_queue_size > 3
+	fn is_major_importing(&self) -> bool {
+		(self.sync_status)()
 	}
 }
 
@@ -57,7 +56,7 @@ trait Broadcast: Send + Sync {
 	fn take_at(&self, num: Option<u64>);
 }
 
-impl Broadcast for IoChannel<ClientIoMessage> {
+impl Broadcast for Mutex<IoChannel<ClientIoMessage>> {
 	fn take_at(&self, num: Option<u64>) {
 		let num = match num {
 			Some(n) => n,
@@ -66,7 +65,7 @@ impl Broadcast for IoChannel<ClientIoMessage> {
 
 		trace!(target: "snapshot_watcher", "broadcast: {}", num);
 
-		if let Err(e) = self.send(ClientIoMessage::TakeSnapshot(num)) {
+		if let Err(e) = self.lock().send(ClientIoMessage::TakeSnapshot(num)) {
 			warn!("Snapshot watcher disconnected from IoService: {}", e);
 		}
 	}
@@ -93,7 +92,7 @@ impl Watcher {
 				client: client,
 				sync_status: sync_status,
 			}),
-			broadcast: Box::new(channel),
+			broadcast: Box::new(Mutex::new(channel)),
 			period: period,
 			history: history,
 		}
@@ -108,9 +107,10 @@ impl ChainNotify for Watcher {
 		_: Vec<H256>,
 		_: Vec<H256>,
 		_: Vec<H256>,
+		_: Vec<Bytes>,
 		_duration: u64)
 	{
-		if self.oracle.is_major_syncing() { return }
+		if self.oracle.is_major_importing() { return }
 
 		trace!(target: "snapshot_watcher", "{} imported", imported.len());
 
@@ -134,7 +134,7 @@ mod tests {
 
 	use client::ChainNotify;
 
-	use util::{H256, U256};
+	use ethereum_types::{H256, U256};
 
 	use std::collections::HashMap;
 
@@ -145,7 +145,7 @@ mod tests {
 			self.0.get(&hash).cloned()
 		}
 
-		fn is_major_syncing(&self) -> bool { false }
+		fn is_major_importing(&self) -> bool { false }
 	}
 
 	struct TestBroadcast(Option<u64>);
@@ -171,6 +171,7 @@ mod tests {
 
 		watcher.new_blocks(
 			hashes,
+			vec![],
 			vec![],
 			vec![],
 			vec![],

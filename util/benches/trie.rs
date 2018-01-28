@@ -1,4 +1,4 @@
-// Copyright 2015, 2016 Ethcore (UK) Ltd.
+// Copyright 2015-2017 Parity Technologies (UK) Ltd.
 // This file is part of Parity.
 
 // Parity is free software: you can redistribute it and/or modify
@@ -17,22 +17,27 @@
 #![feature(test)]
 
 extern crate test;
+extern crate triehash;
 extern crate ethcore_util;
+extern crate ethcore_bytes;
+extern crate ethcore_bigint;
+extern crate memorydb;
+extern crate patricia_trie as trie;
 #[macro_use]
 extern crate log;
+extern crate hash;
 
-use test::Bencher;
-use ethcore_util::hash::*;
-use ethcore_util::bytes::*;
-use ethcore_util::trie::*;
-use ethcore_util::memorydb::*;
-use ethcore_util::triehash::*;
-use ethcore_util::sha3::*;
-
+use test::{Bencher, black_box};
+use ethcore_bigint::hash::*;
+use ethcore_bytes::*;
+use trie::*;
+use memorydb::*;
+use triehash::*;
+use hash::keccak;
 
 fn random_word(alphabet: &[u8], min_count: usize, diff_count: usize, seed: &mut H256) -> Vec<u8> {
 	assert!(min_count + diff_count <= 32);
-	*seed = seed.sha3();
+	*seed = keccak(&seed);
 	let r = min_count + (seed[31] as usize % (diff_count + 1));
 	let mut ret: Vec<u8> = Vec::with_capacity(r);
 	for i in 0..r {
@@ -43,13 +48,13 @@ fn random_word(alphabet: &[u8], min_count: usize, diff_count: usize, seed: &mut 
 
 fn random_bytes(min_count: usize, diff_count: usize, seed: &mut H256) -> Vec<u8> {
 	assert!(min_count + diff_count <= 32);
-	*seed = seed.sha3();
+	*seed = keccak(&seed);
 	let r = min_count + (seed[31] as usize % (diff_count + 1));
 	seed[0..r].to_vec()
 }
 
 fn random_value(seed: &mut H256) -> Bytes {
-	*seed = seed.sha3();
+	*seed = keccak(&seed);
 	match seed[0] % 2 {
 		1 => vec![seed[31];1],
 		_ => seed.to_vec(),
@@ -77,6 +82,32 @@ fn trie_insertions_32_mir_1k(b: &mut Bencher) {
 		hash_count = t.hash_count;
 	});
 //	println!("hash_count: {}", hash_count);
+}
+#[bench]
+fn trie_iter(b: &mut Bencher) {
+	let st = StandardMap {
+		alphabet: Alphabet::All,
+		min_key: 32,
+		journal_key: 0,
+		value_mode: ValueMode::Mirror,
+		count: 1000,
+	};
+	let d = st.make();
+	let mut memdb = MemoryDB::new();
+	let mut root = H256::new();
+	{
+		let mut t = TrieDBMut::new(&mut memdb, &mut root);
+		for i in d.iter() {
+			t.insert(&i.0, &i.1).unwrap();
+		}
+	}
+
+	b.iter(&mut ||{
+		let t = TrieDB::new(&memdb, &root).unwrap();
+		for n in t.iter().unwrap() {
+			black_box(n).unwrap();
+		}
+	});
 }
 
 #[bench]
@@ -280,11 +311,11 @@ fn triehash_insertions_six_low(b: &mut Bencher) {
 }
 
 #[bench]
-fn sha3x10000(b: &mut Bencher) {
+fn keccakx10000(b: &mut Bencher) {
 	b.iter(||{
 		let mut seed = H256::new();
 		for _ in 0..10000 {
-			seed = seed.sha3()
+			seed = keccak(&seed);
 		}
 	})
 }

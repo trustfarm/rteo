@@ -1,4 +1,4 @@
-// Copyright 2015, 2016 Ethcore (UK) Ltd.
+// Copyright 2015-2017 Parity Technologies (UK) Ltd.
 // This file is part of Parity.
 
 // Parity is free software: you can redistribute it and/or modify
@@ -15,15 +15,23 @@
 // along with Parity.  If not, see <http://www.gnu.org/licenses/>.
 
 use std::sync::Arc;
-use std::mem;
 use std::thread::{JoinHandle, self};
 use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use crossbeam::sync::chase_lev;
 use service::{HandlerId, IoChannel, IoContext};
 use IoHandler;
-use panics::*;
+use std::cell::Cell;
 
 use std::sync::{Condvar as SCondvar, Mutex as SMutex};
+
+const STACK_SIZE: usize = 16*1024*1024;
+
+thread_local! {
+	/// Stack size
+	/// Should be modified if it is changed in Rust since it is no way
+	/// to know or get it
+	pub static LOCAL_STACK_SIZE: Cell<usize> = Cell::new(::std::env::var("RUST_MIN_STACK").ok().and_then(|s| s.parse().ok()).unwrap_or(2 * 1024 * 1024));
+}
 
 pub enum WorkType<Message> {
 	Readable,
@@ -56,7 +64,6 @@ impl Worker {
 						channel: IoChannel<Message>,
 						wait: Arc<SCondvar>,
 						wait_mutex: Arc<SMutex<()>>,
-						panic_handler: Arc<PanicHandler>
 					   ) -> Worker
 					where Message: Send + Sync + Clone + 'static {
 		let deleting = Arc::new(AtomicBool::new(false));
@@ -66,11 +73,10 @@ impl Worker {
 			deleting: deleting.clone(),
 			wait_mutex: wait_mutex.clone(),
 		};
-		worker.thread = Some(thread::Builder::new().name(format!("IO Worker #{}", index)).spawn(
+		worker.thread = Some(thread::Builder::new().stack_size(STACK_SIZE).name(format!("IO Worker #{}", index)).spawn(
 			move || {
-				panic_handler.catch_panic(move || {
-					Worker::work_loop(stealer, channel.clone(), wait, wait_mutex.clone(), deleting)
-				}).unwrap()
+				LOCAL_STACK_SIZE.with(|val| val.set(STACK_SIZE));
+				Worker::work_loop(stealer, channel.clone(), wait, wait_mutex.clone(), deleting)
 			})
 			.expect("Error creating worker thread"));
 		worker
@@ -83,18 +89,18 @@ impl Worker {
 						where Message: Send + Sync + Clone + 'static {
 		loop {
 			{
-				let lock = wait_mutex.lock().unwrap();
+				let lock = wait_mutex.lock().expect("Poisoned work_loop mutex");
 				if deleting.load(AtomicOrdering::Acquire) {
 					return;
 				}
 				let _ = wait.wait(lock);
 			}
 
-			if deleting.load(AtomicOrdering::Acquire) {
-				return;
-			}
-			while let chase_lev::Steal::Data(work) = stealer.steal() {
-				Worker::do_work(work, channel.clone());
+			while !deleting.load(AtomicOrdering::Acquire) {
+				match stealer.steal() {
+					chase_lev::Steal::Data(work) => Worker::do_work(work, channel.clone()),
+					_ => break,
+				}
 			}
 		}
 	}
@@ -123,11 +129,12 @@ impl Worker {
 impl Drop for Worker {
 	fn drop(&mut self) {
 		trace!(target: "shutdown", "[IoWorker] Closing...");
-		let _ = self.wait_mutex.lock().unwrap();
+		let _ = self.wait_mutex.lock().expect("Poisoned work_loop mutex");
 		self.deleting.store(true, AtomicOrdering::Release);
 		self.wait.notify_all();
-		let thread = mem::replace(&mut self.thread, None).unwrap();
-		thread.join().ok();
+		if let Some(thread) = self.thread.take() {
+			thread.join().ok();
+		}
 		trace!(target: "shutdown", "[IoWorker] Closed");
 	}
 }

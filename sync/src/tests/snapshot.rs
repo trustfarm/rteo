@@ -1,4 +1,4 @@
-// Copyright 2015, 2016 Ethcore (UK) Ltd.
+// Copyright 2015-2017 Parity Technologies (UK) Ltd.
 // This file is part of Parity.
 
 // Parity is free software: you can redistribute it and/or modify
@@ -14,11 +14,17 @@
 // You should have received a copy of the GNU General Public License
 // along with Parity.  If not, see <http://www.gnu.org/licenses/>.
 
-use util::*;
+use std::collections::HashMap;
+use std::sync::Arc;
+use hash::keccak;
+use ethereum_types::H256;
+use parking_lot::Mutex;
+use bytes::Bytes;
 use ethcore::snapshot::{SnapshotService, ManifestData, RestorationStatus};
 use ethcore::header::BlockNumber;
 use ethcore::client::{EachBlockWith};
 use super::helpers::*;
+use SyncConfig;
 
 pub struct TestSnapshotService {
 	manifest: Option<ManifestData>,
@@ -46,14 +52,15 @@ impl TestSnapshotService {
 		let state_chunks: Vec<Bytes> = (0..num_state_chunks).map(|_| H256::random().to_vec()).collect();
 		let block_chunks: Vec<Bytes> = (0..num_block_chunks).map(|_| H256::random().to_vec()).collect();
 		let manifest = ManifestData {
-			state_hashes: state_chunks.iter().map(|data| data.sha3()).collect(),
-			block_hashes: block_chunks.iter().map(|data| data.sha3()).collect(),
+			version: 2,
+			state_hashes: state_chunks.iter().map(|data| keccak(data)).collect(),
+			block_hashes: block_chunks.iter().map(|data| keccak(data)).collect(),
 			state_root: H256::new(),
 			block_number: block_number,
 			block_hash: block_hash,
 		};
-		let mut chunks: HashMap<H256, Bytes> = state_chunks.into_iter().map(|data| (data.sha3(), data)).collect();
-		chunks.extend(block_chunks.into_iter().map(|data| (data.sha3(), data)));
+		let mut chunks: HashMap<H256, Bytes> = state_chunks.into_iter().map(|data| (keccak(&data), data)).collect();
+		chunks.extend(block_chunks.into_iter().map(|data| (keccak(&data), data)));
 		TestSnapshotService {
 			manifest: Some(manifest),
 			chunks: chunks,
@@ -69,6 +76,10 @@ impl SnapshotService for TestSnapshotService {
 		self.manifest.as_ref().cloned()
 	}
 
+	fn supported_versions(&self) -> Option<(u64, u64)> {
+		Some((1, 2))
+	}
+
 	fn chunk(&self, hash: H256) -> Option<Bytes> {
 		self.chunks.get(&hash).cloned()
 	}
@@ -77,7 +88,9 @@ impl SnapshotService for TestSnapshotService {
 		match *self.restoration_manifest.lock() {
 			Some(ref manifest) if self.state_restoration_chunks.lock().len() == manifest.state_hashes.len() &&
 				self.block_restoration_chunks.lock().len() == manifest.block_hashes.len() => RestorationStatus::Inactive,
-			Some(_) => RestorationStatus::Ongoing {
+			Some(ref manifest) => RestorationStatus::Ongoing {
+				state_chunks: manifest.state_hashes.len() as u32,
+				block_chunks: manifest.block_hashes.len() as u32,
 				state_chunks_done: self.state_restoration_chunks.lock().len() as u32,
 				block_chunks_done: self.block_restoration_chunks.lock().len() as u32,
 			},
@@ -113,11 +126,16 @@ impl SnapshotService for TestSnapshotService {
 #[test]
 fn snapshot_sync() {
 	::env_logger::init().ok();
-	let mut net = TestNet::new(2);
-	net.peer_mut(0).snapshot_service = Arc::new(TestSnapshotService::new_with_snapshot(16, H256::new(), 1));
-	net.peer_mut(0).chain.add_blocks(1, EachBlockWith::Nothing);
-	net.sync_steps(19); // status + manifest + chunks
-	assert_eq!(net.peer(1).snapshot_service.state_restoration_chunks.lock().len(), net.peer(0).snapshot_service.manifest.as_ref().unwrap().state_hashes.len());
-	assert_eq!(net.peer(1).snapshot_service.block_restoration_chunks.lock().len(), net.peer(0).snapshot_service.manifest.as_ref().unwrap().block_hashes.len());
+	let mut config = SyncConfig::default();
+	config.warp_sync = true;
+	let mut net = TestNet::new_with_config(5, config);
+	let snapshot_service = Arc::new(TestSnapshotService::new_with_snapshot(16, H256::new(), 500000));
+	for i in 0..4 {
+		net.peer_mut(i).snapshot_service = snapshot_service.clone();
+		net.peer(i).chain.add_blocks(1, EachBlockWith::Nothing);
+	}
+	net.sync_steps(50);
+	assert_eq!(net.peer(4).snapshot_service.state_restoration_chunks.lock().len(), net.peer(0).snapshot_service.manifest.as_ref().unwrap().state_hashes.len());
+	assert_eq!(net.peer(4).snapshot_service.block_restoration_chunks.lock().len(), net.peer(0).snapshot_service.manifest.as_ref().unwrap().block_hashes.len());
 }
 

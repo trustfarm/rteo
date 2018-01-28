@@ -1,4 +1,4 @@
-// Copyright 2015, 2016 Ethcore (UK) Ltd.
+// Copyright 2015-2017 Parity Technologies (UK) Ltd.
 // This file is part of Parity.
 
 // Parity is free software: you can redistribute it and/or modify
@@ -18,16 +18,16 @@
 
 use std::sync::Arc;
 
+use tempdir::TempDir;
 use client::{BlockChainClient, Client};
-use ids::BlockID;
+use ids::BlockId;
 use snapshot::service::{Service, ServiceParams};
 use snapshot::{self, ManifestData, SnapshotService};
 use spec::Spec;
 use tests::helpers::generate_dummy_client_with_spec_and_data;
 
-use devtools::RandomTempPath;
 use io::IoChannel;
-use util::kvdb::DatabaseConfig;
+use kvdb_rocksdb::{Database, DatabaseConfig};
 
 struct NoopDBRestore;
 
@@ -46,30 +46,27 @@ fn restored_is_equivalent() {
 
 	let client = generate_dummy_client_with_spec_and_data(Spec::new_null, NUM_BLOCKS, TX_PER, &gas_prices);
 
-	let path = RandomTempPath::create_dir();
-	let mut path = path.as_path().clone();
-	let mut client_db = path.clone();
-
-	client_db.push("client_db");
-	path.push("snapshot");
+	let tempdir = TempDir::new("").unwrap();
+	let client_db = tempdir.path().join("client_db");
+	let path = tempdir.path().join("snapshot");
 
 	let db_config = DatabaseConfig::with_columns(::db::NUM_COLUMNS);
+	let client_db = Database::open(&db_config, client_db.to_str().unwrap()).unwrap();
 
 	let spec = Spec::new_null();
 	let client2 = Client::new(
 		Default::default(),
 		&spec,
-		&client_db,
+		Arc::new(client_db),
 		Arc::new(::miner::Miner::with_spec(&spec)),
 		IoChannel::disconnected(),
-		&db_config,
 	).unwrap();
 
 	let service_params = ServiceParams {
 		engine: spec.engine.clone(),
 		genesis_block: spec.genesis_block(),
 		db_config: db_config,
-		pruning: ::util::journaldb::Algorithm::Archive,
+		pruning: ::journaldb::Algorithm::Archive,
 		channel: IoChannel::disconnected(),
 		snapshot_root: path,
 		db_restore: client2.clone(),
@@ -96,8 +93,8 @@ fn restored_is_equivalent() {
 	assert_eq!(service.status(), ::snapshot::RestorationStatus::Inactive);
 
 	for x in 0..NUM_BLOCKS {
-		let block1 = client.block(BlockID::Number(x as u64)).unwrap();
-		let block2 = client2.block(BlockID::Number(x as u64)).unwrap();
+		let block1 = client.block(BlockId::Number(x as u64)).unwrap();
+		let block2 = client2.block(BlockId::Number(x as u64)).unwrap();
 
 		assert_eq!(block1, block2);
 	}
@@ -106,22 +103,22 @@ fn restored_is_equivalent() {
 #[test]
 fn guards_delete_folders() {
 	let spec = Spec::new_null();
-	let path = RandomTempPath::create_dir();
-	let mut path = path.as_path().clone();
+	let tempdir = TempDir::new("").unwrap();
 	let service_params = ServiceParams {
 		engine: spec.engine.clone(),
 		genesis_block: spec.genesis_block(),
 		db_config: DatabaseConfig::with_columns(::db::NUM_COLUMNS),
-		pruning: ::util::journaldb::Algorithm::Archive,
+		pruning: ::journaldb::Algorithm::Archive,
 		channel: IoChannel::disconnected(),
-		snapshot_root: path.clone(),
+		snapshot_root: tempdir.path().to_owned(),
 		db_restore: Arc::new(NoopDBRestore),
 	};
 
 	let service = Service::new(service_params).unwrap();
-	path.push("restoration");
+	let path = tempdir.path().join("restoration");
 
 	let manifest = ManifestData {
+		version: 2,
 		state_hashes: vec![],
 		block_hashes: vec![],
 		block_number: 0,

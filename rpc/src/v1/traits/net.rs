@@ -1,4 +1,4 @@
-// Copyright 2015, 2016 Ethcore (UK) Ltd.
+// Copyright 2015-2017 Parity Technologies (UK) Ltd.
 // This file is part of Parity.
 
 // Parity is free software: you can redistribute it and/or modify
@@ -15,27 +15,22 @@
 // along with Parity.  If not, see <http://www.gnu.org/licenses/>.
 
 //! Net rpc interface.
-use std::sync::Arc;
-use jsonrpc_core::*;
+use jsonrpc_core::Result;
 
-/// Net rpc interface.
-pub trait Net: Sized + Send + Sync + 'static {
-	/// Returns protocol version.
-	fn version(&self, _: Params) -> Result<Value, Error>;
+build_rpc_trait! {
+	/// Net rpc interface.
+	pub trait Net {
+		/// Returns protocol version.
+		#[rpc(name = "net_version")]
+		fn version(&self) -> Result<String>;
 
-	/// Returns number of peers connected to node.
-	fn peer_count(&self, _: Params) -> Result<Value, Error>;
+		/// Returns number of peers connected to node.
+		#[rpc(name = "net_peerCount")]
+		fn peer_count(&self) -> Result<String>;
 
-	/// Returns true if client is actively listening for network connections.
-	/// Otherwise false.
-	fn is_listening(&self, _: Params) -> Result<Value, Error>;
-
-	/// Should be used to convert object to io delegate.
-	fn to_delegate(self) -> IoDelegate<Self> {
-		let mut delegate = IoDelegate::new(Arc::new(self));
-		delegate.add_method("net_version", Net::version);
-		delegate.add_method("net_peerCount", Net::peer_count);
-		delegate.add_method("net_listening", Net::is_listening);
-		delegate
+		/// Returns true if client is actively listening for network connections.
+		/// Otherwise false.
+		#[rpc(name = "net_listening")]
+		fn is_listening(&self) -> Result<bool>;
 	}
 }

@@ -1,4 +1,4 @@
-// Copyright 2015, 2016 Ethcore (UK) Ltd.
+// Copyright 2015-2017 Parity Technologies (UK) Ltd.
 // This file is part of Parity.
 
 // Parity is free software: you can redistribute it and/or modify
@@ -15,34 +15,42 @@
 // along with Parity.  If not, see <http://www.gnu.org/licenses/>.
 
 use std::str::FromStr;
+use std::path::Path;
+use std::fmt::{Display, Formatter, Error as FmtError};
+
+use mode::Mode as IpcMode;
+use verification::{VerifierType, QueueConfig};
+use journaldb;
+use kvdb_rocksdb::CompactionProfile;
+
 pub use std::time::Duration;
 pub use blockchain::Config as BlockChainConfig;
 pub use trace::Config as TraceConfig;
 pub use evm::VMType;
 
-use verification::{VerifierType, QueueConfig};
-use util::{journaldb, CompactionProfile};
-
 /// Client state db compaction profile
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub enum DatabaseCompactionProfile {
-	/// Default compaction profile
-	Default,
+	/// Try to determine compaction profile automatically
+	Auto,
+	/// SSD compaction profile
+	SSD,
 	/// HDD or other slow storage io compaction profile
 	HDD,
 }
 
 impl Default for DatabaseCompactionProfile {
 	fn default() -> Self {
-		DatabaseCompactionProfile::Default
+		DatabaseCompactionProfile::Auto
 	}
 }
 
 impl DatabaseCompactionProfile {
 	/// Returns corresponding compaction profile.
-	pub fn compaction_profile(&self) -> CompactionProfile {
+	pub fn compaction_profile(&self, db_path: &Path) -> CompactionProfile {
 		match *self {
-			DatabaseCompactionProfile::Default => Default::default(),
+			DatabaseCompactionProfile::Auto => CompactionProfile::auto(db_path),
+			DatabaseCompactionProfile::SSD => CompactionProfile::ssd(),
 			DatabaseCompactionProfile::HDD => CompactionProfile::hdd(),
 		}
 	}
@@ -53,9 +61,10 @@ impl FromStr for DatabaseCompactionProfile {
 
 	fn from_str(s: &str) -> Result<Self, Self::Err> {
 		match s {
-			"ssd" | "default" => Ok(DatabaseCompactionProfile::Default),
+			"auto" => Ok(DatabaseCompactionProfile::Auto),
+			"ssd" => Ok(DatabaseCompactionProfile::SSD),
 			"hdd" => Ok(DatabaseCompactionProfile::HDD),
-			_ => Err("Invalid compaction profile given. Expected hdd/ssd (default).".into()),
+			_ => Err("Invalid compaction profile given. Expected default/hdd/ssd.".into()),
 		}
 	}
 }
@@ -71,6 +80,8 @@ pub enum Mode {
 	/// Goes offline after RLP is inactive for some (given) time and
 	/// stays inactive.
 	Dark(Duration),
+	/// Always off.
+	Off,
 }
 
 impl Default for Mode {
@@ -78,6 +89,40 @@ impl Default for Mode {
 		Mode::Active
 	}
 }
+
+impl Display for Mode {
+	fn fmt(&self, f: &mut Formatter) -> Result<(), FmtError> {
+		match *self {
+			Mode::Active => write!(f, "active"),
+			Mode::Passive(..) => write!(f, "passive"),
+			Mode::Dark(..) => write!(f, "dark"),
+			Mode::Off => write!(f, "offline"),
+		}
+	}
+}
+
+impl Into<IpcMode> for Mode {
+	fn into(self) -> IpcMode {
+		match self {
+			Mode::Off => IpcMode::Off,
+			Mode::Dark(timeout) => IpcMode::Dark(timeout.as_secs()),
+			Mode::Passive(timeout, alarm) => IpcMode::Passive(timeout.as_secs(), alarm.as_secs()),
+			Mode::Active => IpcMode::Active,
+		}
+	}
+}
+
+impl From<IpcMode> for Mode {
+	fn from(mode: IpcMode) -> Self {
+		match mode {
+			IpcMode::Off => Mode::Off,
+			IpcMode::Dark(timeout) => Mode::Dark(Duration::from_secs(timeout)),
+			IpcMode::Passive(timeout, alarm) => Mode::Passive(Duration::from_secs(timeout), Duration::from_secs(alarm)),
+			IpcMode::Active => Mode::Active,
+		}
+	}
+}
+
 
 /// Client configuration. Includes configs for all sub-systems.
 #[derive(Debug, PartialEq, Default)]
@@ -96,7 +141,7 @@ pub struct ClientConfig {
 	pub pruning: journaldb::Algorithm,
 	/// The name of the client instance.
 	pub name: String,
-	/// State db cache-size if not default
+	/// RocksDB column cache-size if not default
 	pub db_cache_size: Option<usize>,
 	/// State db compaction profile
 	pub db_compaction: DatabaseCompactionProfile,
@@ -104,8 +149,20 @@ pub struct ClientConfig {
 	pub db_wal: bool,
 	/// Operating mode
 	pub mode: Mode,
+	/// The chain spec name
+	pub spec_name: String,
 	/// Type of block verifier used by client.
 	pub verifier_type: VerifierType,
+	/// State db cache-size.
+	pub state_cache_size: usize,
+	/// EVM jump-tables cache size.
+	pub jump_table_size: usize,
+	/// Minimum state pruning history size.
+	pub history: u64,
+	/// Ideal memory usage for state pruning history.
+	pub history_mem: usize,
+	/// Check seal valididity on block import
+	pub check_seal: bool,
 }
 
 #[cfg(test)]
@@ -114,13 +171,13 @@ mod test {
 
 	#[test]
 	fn test_default_compaction_profile() {
-		assert_eq!(DatabaseCompactionProfile::default(), DatabaseCompactionProfile::Default);
+		assert_eq!(DatabaseCompactionProfile::default(), DatabaseCompactionProfile::Auto);
 	}
 
 	#[test]
 	fn test_parsing_compaction_profile() {
-		assert_eq!(DatabaseCompactionProfile::Default, "ssd".parse().unwrap());
-		assert_eq!(DatabaseCompactionProfile::Default, "default".parse().unwrap());
+		assert_eq!(DatabaseCompactionProfile::Auto, "auto".parse().unwrap());
+		assert_eq!(DatabaseCompactionProfile::SSD, "ssd".parse().unwrap());
 		assert_eq!(DatabaseCompactionProfile::HDD, "hdd".parse().unwrap());
 	}
 

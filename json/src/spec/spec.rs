@@ -1,4 +1,4 @@
-// Copyright 2015, 2016 Ethcore (UK) Ltd.
+// Copyright 2015-2017 Parity Technologies (UK) Ltd.
 // This file is part of Parity.
 
 // Parity is free software: you can redistribute it and/or modify
@@ -27,8 +27,8 @@ pub struct Spec {
 	/// Spec name.
 	pub name: String,
 	/// Special fork name.
-	#[serde(rename="forkName")]
-	pub fork_name: Option<String>,
+	#[serde(rename="dataDir")]
+	pub data_dir: Option<String>,
 	/// Engine.
 	pub engine: Engine,
 	/// Spec params.
@@ -57,16 +57,14 @@ mod tests {
 	fn spec_deserialization() {
 		let s = r#"{
 	"name": "Morden",
+	"dataDir": "morden",
 	"engine": {
 		"Ethash": {
 			"params": {
-				"gasLimitBoundDivisor": "0x0400",
 				"minimumDifficulty": "0x020000",
 				"difficultyBoundDivisor": "0x0800",
 				"durationLimit": "0x0d",
-				"blockReward": "0x4563918244F40000",
-				"registrar" : "0xc6d9d2cd449a754c494264e1809c50e34d64562b",
-				"frontierCompatibilityModeLimit" : "0x",
+				"homesteadTransition" : "0x",
 				"daoHardforkTransition": "0xffffffffffffffff",
 				"daoHardforkBeneficiary": "0x0000000000000000000000000000000000000000",
 				"daoHardforkAccounts": []
@@ -75,12 +73,13 @@ mod tests {
 	},
 	"params": {
 		"accountStartNonce": "0x0100000",
-		"frontierCompatibilityModeLimit": "0x789b0",
+		"homesteadTransition": "0x789b0",
 		"maximumExtraDataSize": "0x20",
 		"minGasLimit": "0x1388",
 		"networkID" : "0x2",
 		"forkBlock": "0xffffffffffffffff",
-		"forkCanonHash": "0x0000000000000000000000000000000000000000000000000000000000000000"
+		"forkCanonHash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+		"gasLimitBoundDivisor": "0x20"
 	},
 	"genesis": {
 		"seal": {
