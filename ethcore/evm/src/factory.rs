@@ -32,24 +32,7 @@ pub struct Factory {
 impl Factory {
 	/// Create fresh instance of VM
 	/// Might choose implementation depending on supplied gas.
-	#[cfg(feature = "jit")]
-	pub fn create(&self, gas: U256) -> Box<Vm> {
-		match self.evm {
-			VMType::Jit => {
-				Box::new(super::jit::JitEvm::default())
-			},
-			VMType::Interpreter => if Self::can_fit_in_usize(gas) {
-				Box::new(super::interpreter::Interpreter::<usize>::new(self.evm_cache.clone()))
-			} else {
-				Box::new(super::interpreter::Interpreter::<U256>::new(self.evm_cache.clone()))
-			}
-		}
-	}
-
-	/// Create fresh instance of VM
-	/// Might choose implementation depending on supplied gas.
-	#[cfg(not(feature = "jit"))]
-	pub fn create(&self, gas: U256) -> Box<Vm> {
+	pub fn create(&self, gas: &U256) -> Box<Vm> {
 		match self.evm {
 			VMType::Interpreter => if Self::can_fit_in_usize(gas) {
 				Box::new(super::interpreter::Interpreter::<usize>::new(self.evm_cache.clone()))
@@ -68,23 +51,13 @@ impl Factory {
 		}
 	}
 
-	fn can_fit_in_usize(gas: U256) -> bool {
-		gas == U256::from(gas.low_u64() as usize)
+	fn can_fit_in_usize(gas: &U256) -> bool {
+		gas == &U256::from(gas.low_u64() as usize)
 	}
 }
 
 impl Default for Factory {
-	/// Returns jitvm factory
-	#[cfg(all(feature = "jit", not(test)))]
-	fn default() -> Factory {
-		Factory {
-			evm: VMType::Jit,
-			evm_cache: Arc::new(SharedCache::default()),
-		}
-	}
-
 	/// Returns native rust evm factory
-	#[cfg(any(not(feature = "jit"), test))]
 	fn default() -> Factory {
 		Factory {
 			evm: VMType::Interpreter,
@@ -95,30 +68,13 @@ impl Default for Factory {
 
 #[test]
 fn test_create_vm() {
-	let _vm = Factory::default().create(U256::zero());
+	let _vm = Factory::default().create(&U256::zero());
 }
 
 /// Create tests by injecting different VM factories
 #[macro_export]
 macro_rules! evm_test(
-	(ignorejit => $name_test: ident: $name_jit: ident, $name_int: ident) => {
-		#[test]
-		#[ignore]
-		#[cfg(feature = "jit")]
-		fn $name_jit() {
-			$name_test(Factory::new(VMType::Jit, 1024 * 32));
-		}
-		#[test]
-		fn $name_int() {
-			$name_test(Factory::new(VMType::Interpreter, 1024 * 32));
-		}
-	};
-	($name_test: ident: $name_jit: ident, $name_int: ident) => {
-		#[test]
-		#[cfg(feature = "jit")]
-		fn $name_jit() {
-			$name_test(Factory::new(VMType::Jit, 1024 * 32));
-		}
+	($name_test: ident: $name_int: ident) => {
 		#[test]
 		fn $name_int() {
 			$name_test(Factory::new(VMType::Interpreter, 1024 * 32));
@@ -129,14 +85,7 @@ macro_rules! evm_test(
 /// Create ignored tests by injecting different VM factories
 #[macro_export]
 macro_rules! evm_test_ignore(
-	($name_test: ident: $name_jit: ident, $name_int: ident) => {
-		#[test]
-		#[ignore]
-		#[cfg(feature = "jit")]
-		#[cfg(feature = "ignored-tests")]
-		fn $name_jit() {
-			$name_test(Factory::new(VMType::Jit, 1024 * 32));
-		}
+	($name_test: ident: $name_int: ident) => {
 		#[test]
 		#[ignore]
 		#[cfg(feature = "ignored-tests")]

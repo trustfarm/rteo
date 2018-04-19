@@ -16,34 +16,34 @@
 
 //! Parameters for a block chain.
 
-use std::io::Read;
 use std::collections::BTreeMap;
+use std::io::Read;
 use std::path::Path;
 use std::sync::Arc;
 
-use ethereum_types::{H256, Bloom, U256, Address};
-use memorydb::MemoryDB;
 use bytes::Bytes;
+use ethereum_types::{H256, Bloom, U256, Address};
 use ethjson;
 use hash::{KECCAK_NULL_RLP, keccak};
+use memorydb::MemoryDB;
 use parking_lot::RwLock;
 use rlp::{Rlp, RlpStream};
-use rustc_hex::FromHex;
+use rustc_hex::{FromHex, ToHex};
 use vm::{EnvInfo, CallType, ActionValue, ActionParams, ParamsType};
 
-use super::genesis::Genesis;
-use super::seal::Generic as GenericSeal;
-
 use builtin::Builtin;
+use encoded;
 use engines::{EthEngine, NullEngine, InstantSeal, BasicAuthority, AuthorityRound, Tendermint, DEFAULT_BLOCKHASH_CONTRACT};
 use error::Error;
 use executive::Executive;
 use factory::Factories;
 use header::{BlockNumber, Header};
 use machine::EthereumMachine;
-use pod_state::*;
-use state::{Backend, State, Substate};
+use pod_state::PodState;
+use spec::Genesis;
+use spec::seal::Generic as GenericSeal;
 use state::backend::Basic as BasicBackend;
+use state::{Backend, State, Substate};
 use trace::{NoopTracer, NoopVMTracer};
 
 pub use ethash::OptimizeFor;
@@ -109,8 +109,8 @@ pub struct CommonParams {
 	pub nonce_cap_increment: u64,
 	/// Enable dust cleanup for contracts.
 	pub remove_dust_contracts: bool,
-	/// Wasm support
-	pub wasm: bool,
+	/// Wasm activation blocknumber, if any disabled initially.
+	pub wasm_activation_transition: BlockNumber,
 	/// Gas limit bound divisor (how much gas limit can change per block)
 	pub gas_limit_bound_divisor: U256,
 	/// Registrar contract address.
@@ -119,6 +119,8 @@ pub struct CommonParams {
 	pub node_permission_contract: Option<Address>,
 	/// Maximum contract code size that can be deployed.
 	pub max_code_size: u64,
+	/// Number of first block where max code size limit is active.
+	pub max_code_size_transition: BlockNumber,
 	/// Transaction permission managing contract address.
 	pub transaction_permission_contract: Option<Address>,
 }
@@ -126,9 +128,18 @@ pub struct CommonParams {
 impl CommonParams {
 	/// Schedule for an EVM in the post-EIP-150-era of the Ethereum main net.
 	pub fn schedule(&self, block_number: u64) -> ::vm::Schedule {
-		let mut schedule = ::vm::Schedule::new_post_eip150(self.max_code_size as _, true, true, true);
+		let mut schedule = ::vm::Schedule::new_post_eip150(self.max_code_size(block_number) as _, true, true, true);
 		self.update_schedule(block_number, &mut schedule);
 		schedule
+	}
+
+	/// Returns max code size at given block.
+	pub fn max_code_size(&self, block_number: u64) -> u64 {
+		if block_number >= self.max_code_size_transition {
+			self.max_code_size
+		} else {
+			u64::max_value()
+		}
 	}
 
 	/// Apply common spec config parameters to the schedule.
@@ -145,6 +156,9 @@ impl CommonParams {
 				true => ::vm::CleanDustMode::WithCodeAndStorage,
 				false => ::vm::CleanDustMode::BasicOnly,
 			};
+		}
+		if block_number >= self.wasm_activation_transition {
+			schedule.wasm = Some(Default::default());
 		}
 	}
 
@@ -220,12 +234,16 @@ impl From<ethjson::spec::Params> for CommonParams {
 			),
 			nonce_cap_increment: p.nonce_cap_increment.map_or(64, Into::into),
 			remove_dust_contracts: p.remove_dust_contracts.unwrap_or(false),
-			wasm: p.wasm.unwrap_or(false),
 			gas_limit_bound_divisor: p.gas_limit_bound_divisor.into(),
 			registrar: p.registrar.map_or_else(Address::new, Into::into),
 			node_permission_contract: p.node_permission_contract.map(Into::into),
 			max_code_size: p.max_code_size.map_or(u64::max_value(), Into::into),
+			max_code_size_transition: p.max_code_size_transition.map_or(0, Into::into),
 			transaction_permission_contract: p.transaction_permission_contract.map(Into::into),
+			wasm_activation_transition: p.wasm_activation_transition.map_or(
+				BlockNumber::max_value(),
+				Into::into
+			),
 		}
 	}
 }
@@ -302,6 +320,9 @@ pub struct Spec {
 	/// Each seal field, expressed as RLP, concatenated.
 	pub seal_rlp: Bytes,
 
+	/// Hardcoded synchronization. Allows the light client to immediately jump to a specific block.
+	pub hardcoded_sync: Option<SpecHardcodedSync>,
+
 	/// Contract constructors to be executed on genesis.
 	constructors: Vec<(Address, Bytes)>,
 
@@ -330,9 +351,49 @@ impl Clone for Spec {
 			timestamp: self.timestamp.clone(),
 			extra_data: self.extra_data.clone(),
 			seal_rlp: self.seal_rlp.clone(),
+			hardcoded_sync: self.hardcoded_sync.clone(),
 			constructors: self.constructors.clone(),
 			state_root_memo: RwLock::new(*self.state_root_memo.read()),
 			genesis_state: self.genesis_state.clone(),
+		}
+	}
+}
+
+/// Part of `Spec`. Describes the hardcoded synchronization parameters.
+pub struct SpecHardcodedSync {
+	/// Header of the block to jump to for hardcoded sync, and total difficulty.
+	pub header: encoded::Header,
+	/// Total difficulty of the block to jump to.
+	pub total_difficulty: U256,
+	/// List of hardcoded CHTs, in order. If `hardcoded_sync` is set, the CHTs should include the
+	/// header of `hardcoded_sync`.
+	pub chts: Vec<H256>,
+}
+
+impl SpecHardcodedSync {
+	/// Turns this specifications back into JSON. Useful for pretty printing.
+	pub fn to_json(self) -> ethjson::spec::HardcodedSync {
+		self.into()
+	}
+}
+
+#[cfg(test)]
+impl Clone for SpecHardcodedSync {
+	fn clone(&self) -> SpecHardcodedSync {
+		SpecHardcodedSync {
+			header: self.header.clone(),
+			total_difficulty: self.total_difficulty.clone(),
+			chts: self.chts.clone(),
+		}
+	}
+}
+
+impl From<SpecHardcodedSync> for ethjson::spec::HardcodedSync {
+	fn from(sync: SpecHardcodedSync) -> ethjson::spec::HardcodedSync {
+		ethjson::spec::HardcodedSync {
+			header: sync.header.into_inner().to_hex(),
+			total_difficulty: ethjson::uint::Uint(sync.total_difficulty),
+			chts: sync.chts.into_iter().map(Into::into).collect(),
 		}
 	}
 }
@@ -355,6 +416,23 @@ fn load_from(spec_params: SpecParams, s: ethjson::spec::Spec) -> Result<Spec, Er
 	let GenericSeal(seal_rlp) = g.seal.into();
 	let params = CommonParams::from(s.params);
 
+	let hardcoded_sync = if let Some(ref hs) = s.hardcoded_sync {
+		if let Ok(header) = hs.header.from_hex() {
+			Some(SpecHardcodedSync {
+				header: encoded::Header::new(header),
+				total_difficulty: hs.total_difficulty.into(),
+				chts: s.hardcoded_sync
+					.as_ref()
+					.map(|s| s.chts.iter().map(|c| c.clone().into()).collect())
+					.unwrap_or(Vec::new()),
+			})
+		} else {
+			None
+		}
+	} else {
+		None
+	};
+
 	let mut s = Spec {
 		name: s.name.clone().into(),
 		engine: Spec::engine(spec_params, s.engine, params, builtins),
@@ -370,6 +448,7 @@ fn load_from(spec_params: SpecParams, s: ethjson::spec::Spec) -> Result<Spec, Er
 		timestamp: g.timestamp,
 		extra_data: g.extra_data,
 		seal_rlp: seal_rlp,
+		hardcoded_sync: hardcoded_sync,
 		constructors: s.accounts
 			.constructors()
 			.into_iter()
@@ -762,6 +841,13 @@ impl Spec {
 		load_bundled!("authority_round")
 	}
 
+	/// Create a new Spec with AuthorityRound consensus which does internal sealing (not
+	/// requiring work) with empty step messages enabled.
+	/// Accounts with secrets keccak("0") and keccak("1") are the validators.
+	pub fn new_test_round_empty_steps() -> Self {
+		load_bundled!("authority_round_empty_steps")
+	}
+
 	/// Create a new Spec with Tendermint consensus which does internal sealing (not requiring
 	/// work).
 	/// Account keccak("0") and keccak("1") are a authorities.
@@ -806,14 +892,15 @@ impl Spec {
 mod tests {
 	use super::*;
 	use state::State;
-	use std::str::FromStr;
-	use tests::helpers::get_temp_state_db;
-	use views::*;
+	use test_helpers::get_temp_state_db;
+	use views::BlockView;
+	use tempdir::TempDir;
 
 	// https://github.com/paritytech/parity/issues/1840
 	#[test]
 	fn test_load_empty() {
-		assert!(Spec::load(&::std::env::temp_dir(), &[] as &[u8]).is_err());
+		let tempdir = TempDir::new("").unwrap();
+		assert!(Spec::load(&tempdir.path(), &[] as &[u8]).is_err());
 	}
 
 	#[test]
@@ -822,16 +909,12 @@ mod tests {
 
 		assert_eq!(
 			test_spec.state_root(),
-			H256::from_str(
-				"f3f4696bbf3b3b07775128eb7a3763279a394e382130f27c21e70233e04946a9",
-			).unwrap()
+			"f3f4696bbf3b3b07775128eb7a3763279a394e382130f27c21e70233e04946a9".into()
 		);
 		let genesis = test_spec.genesis_block();
 		assert_eq!(
-			BlockView::new(&genesis).header_view().hash(),
-			H256::from_str(
-				"0cd786a2425d16f152c658316c423e6ce1181e15c3295826d7c9904cba9ce303",
-			).unwrap()
+			view!(BlockView, &genesis).header_view().hash(),
+			"0cd786a2425d16f152c658316c423e6ce1181e15c3295826d7c9904cba9ce303".into()
 		);
 	}
 
@@ -847,10 +930,8 @@ mod tests {
 			spec.engine.account_start_nonce(0),
 			Default::default(),
 		).unwrap();
-		let expected = H256::from_str(
-			"0000000000000000000000000000000000000000000000000000000000000001",
-		).unwrap();
-		let address = Address::from_str("0000000000000000000000000000000000000005").unwrap();
+		let expected = "0000000000000000000000000000000000000000000000000000000000000001".into();
+		let address = "0000000000000000000000000000000000001337".into();
 
 		assert_eq!(state.storage_at(&address, &H256::zero()).unwrap(), expected);
 		assert_eq!(state.balance(&address).unwrap(), 1.into());

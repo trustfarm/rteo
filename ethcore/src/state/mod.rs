@@ -40,7 +40,7 @@ use executed::{Executed, ExecutionError};
 use types::state_diff::StateDiff;
 use transaction::SignedTransaction;
 use state_db::StateDB;
-use evm::{Factory as EvmFactory};
+use factory::VmFactory;
 
 use ethereum_types::{H256, U256, Address};
 use hashdb::{HashDB, AsHashDB};
@@ -334,6 +334,28 @@ pub enum CleanupMode<'a> {
 	TrackTouched(&'a mut HashSet<Address>),
 }
 
+/// Provides subset of `State` methods to query state information
+pub trait StateInfo {
+	/// Get the nonce of account `a`.
+	fn nonce(&self, a: &Address) -> trie::Result<U256>;
+
+	/// Get the balance of account `a`.
+	fn balance(&self, a: &Address) -> trie::Result<U256>;
+
+	/// Mutate storage of account `address` so that it is `value` for `key`.
+	fn storage_at(&self, address: &Address, key: &H256) -> trie::Result<H256>;
+
+	/// Get accounts' code.
+	fn code(&self, a: &Address) -> trie::Result<Option<Arc<Bytes>>>;
+}
+
+impl<B: Backend> StateInfo for State<B> {
+	fn nonce(&self, a: &Address) -> trie::Result<U256> { State::nonce(self, a) }
+	fn balance(&self, a: &Address) -> trie::Result<U256> { State::balance(self, a) }
+	fn storage_at(&self, address: &Address, key: &H256) -> trie::Result<H256> { State::storage_at(self, address, key) }
+	fn code(&self, address: &Address) -> trie::Result<Option<Arc<Bytes>>> { State::code(self, address) }
+}
+
 const SEC_TRIE_DB_UNWRAP_STR: &'static str = "A state can only be created with valid root. Creating a SecTrieDB with a valid root will not fail. \
 			 Therefore creating a SecTrieDB with this state's root will not fail.";
 
@@ -343,7 +365,7 @@ impl<B: Backend> State<B> {
 	pub fn new(mut db: B, account_start_nonce: U256, factories: Factories) -> State<B> {
 		let mut root = H256::new();
 		{
-			// init trie and reset root too null
+			// init trie and reset root to null
 			let _ = factories.trie.create(db.as_hashdb_mut(), &mut root);
 		}
 
@@ -376,7 +398,7 @@ impl<B: Backend> State<B> {
 	}
 
 	/// Get a VM factory that can execute on this state.
-	pub fn vm_factory(&self) -> EvmFactory {
+	pub fn vm_factory(&self) -> VmFactory {
 		self.factories.vm.clone()
 	}
 
@@ -472,6 +494,13 @@ impl<B: Backend> State<B> {
 		(self.root, self.db)
 	}
 
+	/// Destroy the current object and return single account data.
+	pub fn into_account(self, account: &Address) -> trie::Result<(Option<Arc<Bytes>>, HashMap<H256, H256>)> {
+		// TODO: deconstruct without cloning.
+		let account = self.require(account, true)?;
+		Ok((account.code().clone(), account.storage_changes().clone()))
+	}
+
 	/// Return reference to root
 	pub fn root(&self) -> &H256 {
 		&self.root
@@ -531,8 +560,8 @@ impl<B: Backend> State<B> {
 		// 2. If there's an entry for the account in the global cache check for the key or load it into that account.
 		// 3. If account is missing in the global cache load it into the local cache and cache the key there.
 
-		// check local cache first without updating
 		{
+			// check local cache first without updating
 			let local_cache = self.cache.borrow_mut();
 			let mut local_account = None;
 			if let Some(maybe_acc) = local_cache.get(address) {
@@ -644,7 +673,7 @@ impl<B: Backend> State<B> {
 
 	/// Mutate storage of account `a` so that it is `value` for `key`.
 	pub fn set_storage(&mut self, a: &Address, key: H256, value: H256) -> trie::Result<()> {
-		trace!(target: "state", "set_storage({}:{} to {})", a, key.hex(), value.hex());
+		trace!(target: "state", "set_storage({}:{:x} to {:x})", a, key, value);
 		if self.storage_at(a, &key)? != value {
 			self.require(a, false)?.set_storage(key, value)
 		}
@@ -833,16 +862,26 @@ impl<B: Backend> State<B> {
 		}))
 	}
 
-	fn query_pod(&mut self, query: &PodState) -> trie::Result<()> {
-		for (address, pod_account) in query.get() {
+	// Return a list of all touched addresses in cache.
+	fn touched_addresses(&self) -> Vec<Address> {
+		assert!(self.checkpoints.borrow().is_empty());
+		self.cache.borrow().iter().map(|(add, _)| *add).collect()
+	}
+
+	fn query_pod(&mut self, query: &PodState, touched_addresses: &[Address]) -> trie::Result<()> {
+		let pod = query.get();
+
+		for address in touched_addresses {
 			if !self.ensure_cached(address, RequireCache::Code, true, |a| a.is_some())? {
 				continue
 			}
 
-			// needs to be split into two parts for the refcell code here
-			// to work.
-			for key in pod_account.storage.keys() {
-				self.storage_at(address, key)?;
+			if let Some(pod_account) = pod.get(address) {
+				// needs to be split into two parts for the refcell code here
+				// to work.
+				for key in pod_account.storage.keys() {
+					self.storage_at(address, key)?;
+				}
 			}
 		}
 
@@ -852,9 +891,10 @@ impl<B: Backend> State<B> {
 	/// Returns a `StateDiff` describing the difference from `orig` to `self`.
 	/// Consumes self.
 	pub fn diff_from<X: Backend>(&self, orig: State<X>) -> trie::Result<StateDiff> {
+		let addresses_post = self.touched_addresses();
 		let pod_state_post = self.to_pod();
 		let mut state_pre = orig;
-		state_pre.query_pod(&pod_state_post)?;
+		state_pre.query_pod(&pod_state_post, &addresses_post)?;
 		Ok(pod_state::diff_pod(&state_pre.to_pod(), &pod_state_post))
 	}
 
@@ -981,6 +1021,11 @@ impl<B: Backend> State<B> {
 			}
 		}))
 	}
+
+	/// Replace account code and storage. Creates account if it does not exist.
+	pub fn patch_account(&self, a: &Address, code: Arc<Bytes>, storage: HashMap<H256, H256>) -> trie::Result<()> {
+		Ok(self.require(a, false)?.reset_code_and_storage(code, storage))
+	}
 }
 
 // State proof implementations; useful for light client protocols.
@@ -1066,7 +1111,7 @@ mod tests {
 	use super::*;
 	use ethkey::Secret;
 	use ethereum_types::{H256, U256, Address};
-	use tests::helpers::*;
+	use test_helpers::{get_temp_state, get_temp_state_db};
 	use machine::EthereumMachine;
 	use vm::EnvInfo;
 	use spec::*;
@@ -2085,7 +2130,7 @@ mod tests {
 		let a = Address::zero();
 		state.require(&a, false).unwrap();
 		state.commit().unwrap();
-		assert_eq!(state.root().hex(), "0ce23f3c809de377b008a4a3ee94a0834aac8bec1f86e28ffe4fdb5a15b0c785");
+		assert_eq!(*state.root(), "0ce23f3c809de377b008a4a3ee94a0834aac8bec1f86e28ffe4fdb5a15b0c785".into());
 	}
 
 	#[test]
@@ -2122,7 +2167,7 @@ mod tests {
 	fn create_empty() {
 		let mut state = get_temp_state();
 		state.commit().unwrap();
-		assert_eq!(state.root().hex(), "56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421");
+		assert_eq!(*state.root(), "56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421".into());
 	}
 
 	#[test]
@@ -2179,5 +2224,38 @@ mod tests {
 		assert!(state.exists(&c).unwrap());
 		assert!(state.exists(&d).unwrap());
 		assert!(!state.exists(&e).unwrap());
+	}
+
+	#[test]
+	fn should_trace_diff_suicided_accounts() {
+		use pod_account;
+
+		let a = 10.into();
+		let db = get_temp_state_db();
+		let (root, db) = {
+			let mut state = State::new(db, U256::from(0), Default::default());
+			state.add_balance(&a, &100.into(), CleanupMode::ForceCreate).unwrap();
+			state.commit().unwrap();
+			state.drop()
+		};
+
+		let mut state = State::from_existing(db, root, U256::from(0u8), Default::default()).unwrap();
+		let original = state.clone();
+		state.kill_account(&a);
+
+		assert_eq!(original.touched_addresses(), vec![]);
+		assert_eq!(state.touched_addresses(), vec![a]);
+
+		let diff = state.diff_from(original).unwrap();
+		let diff_map = diff.get();
+		assert_eq!(diff_map.len(), 1);
+		assert!(diff_map.get(&a).is_some());
+		assert_eq!(diff_map.get(&a),
+				   pod_account::diff_pod(Some(&PodAccount {
+					   balance: U256::from(100),
+					   nonce: U256::zero(),
+					   code: Some(Default::default()),
+					   storage: Default::default()
+				   }), None).as_ref());
 	}
 }

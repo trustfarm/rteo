@@ -19,12 +19,13 @@
 use std::sync::Arc;
 
 use tempdir::TempDir;
-use client::{BlockChainClient, Client};
+use client::{Client, BlockInfo};
 use ids::BlockId;
 use snapshot::service::{Service, ServiceParams};
 use snapshot::{self, ManifestData, SnapshotService};
 use spec::Spec;
-use tests::helpers::generate_dummy_client_with_spec_and_data;
+use test_helpers::generate_dummy_client_with_spec_and_data;
+use test_helpers_internal::restoration_db_handler;
 
 use io::IoChannel;
 use kvdb_rocksdb::{Database, DatabaseConfig};
@@ -58,14 +59,14 @@ fn restored_is_equivalent() {
 		Default::default(),
 		&spec,
 		Arc::new(client_db),
-		Arc::new(::miner::Miner::with_spec(&spec)),
+		Arc::new(::miner::Miner::new_for_tests(&spec, None)),
 		IoChannel::disconnected(),
 	).unwrap();
 
 	let service_params = ServiceParams {
 		engine: spec.engine.clone(),
 		genesis_block: spec.genesis_block(),
-		db_config: db_config,
+		restoration_db_handler: restoration_db_handler(db_config),
 		pruning: ::journaldb::Algorithm::Archive,
 		channel: IoChannel::disconnected(),
 		snapshot_root: path,
@@ -107,7 +108,7 @@ fn guards_delete_folders() {
 	let service_params = ServiceParams {
 		engine: spec.engine.clone(),
 		genesis_block: spec.genesis_block(),
-		db_config: DatabaseConfig::with_columns(::db::NUM_COLUMNS),
+		restoration_db_handler: restoration_db_handler(DatabaseConfig::with_columns(::db::NUM_COLUMNS)),
 		pruning: ::journaldb::Algorithm::Archive,
 		channel: IoChannel::disconnected(),
 		snapshot_root: tempdir.path().to_owned(),

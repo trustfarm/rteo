@@ -75,6 +75,11 @@ impl<T: WebApp + 'static> Dapp<T> {
 			fallback_to_index_html: false,
 		}
 	}
+
+	/// Allow the dapp to use `unsafe-eval` to run JS.
+	pub fn allow_js_eval(&mut self) {
+		self.info.allow_js_eval = Some(true);
+	}
 }
 
 impl<T: WebApp> Endpoint for Dapp<T> {
@@ -117,6 +122,7 @@ impl<T: WebApp> Endpoint for Dapp<T> {
 			file,
 			cache: PageCache::Disabled,
 			safe_to_embed_on: self.safe_to_embed_on.clone(),
+			allow_js_eval: self.info.allow_js_eval.clone().unwrap_or(false),
 		}.into_response();
 
 		self.pool.spawn(reader).forget();
@@ -128,12 +134,14 @@ impl<T: WebApp> Endpoint for Dapp<T> {
 impl From<Info> for EndpointInfo {
 	fn from(info: Info) -> Self {
 		EndpointInfo {
+			id: None,
 			name: info.name.into(),
 			description: info.description.into(),
 			author: info.author.into(),
 			icon_url: info.icon_url.into(),
 			local_url: None,
 			version: info.version.into(),
+			allow_js_eval: None,
 		}
 	}
 }

@@ -1,3 +1,104 @@
+Note: Parity 1.8 reached End-of-Life on 2018-03-22 (EOL).
+
+## Parity [v1.8.11](https://github.com/paritytech/parity/releases/tag/v1.8.11) (2018-03-01)
+
+Parity 1.8.11 is a bug-fix release to improve performance and stability.
+
+The full list of included changes:
+
+- Bump stable to 1.8.11 ([#8010](https://github.com/paritytech/parity/pull/8010))
+- Stable Backports ([#8008](https://github.com/paritytech/parity/pull/8008))
+  - Reject too large packets in snapshot sync. ([#7977](https://github.com/paritytech/parity/pull/7977))
+  - Increase max download limit to 128MB ([#7965](https://github.com/paritytech/parity/pull/7965))
+  - Calculate proper keccak256/sha3 using parity. ([#7953](https://github.com/paritytech/parity/pull/7953))
+  - Bump WebSockets ([#7952](https://github.com/paritytech/parity/pull/7952))
+
+## Parity [v1.8.10](https://github.com/paritytech/parity/releases/tag/v1.8.10) (2018-02-20)
+
+Parity 1.8.10 is a bug-fix release to improve performance and stability.
+
+The full list of included changes:
+
+- Bump react-qr-reader ([#7941)](https://github.com/paritytech/parity/pull/7941))
+  - Bump react-qr-reader
+  - Explicit add webrtc-adapter, non-napa qrcode-generator
+- Fix feature=final ([#7914)](https://github.com/paritytech/parity/pull/7914))
+- Fix snap build stable ([#7897)](https://github.com/paritytech/parity/pull/7897))
+- Backport core PRs to stable ([#7892)](https://github.com/paritytech/parity/pull/7892))
+  - Update back-references more aggressively after answering from cache ([#7578)](https://github.com/paritytech/parity/pull/7578))
+  - Store updater metadata in a single place ([#7832)](https://github.com/paritytech/parity/pull/7832))
+  - Flush keyfiles. Resolves [#7632](https://github.com/paritytech/parity/issues/7632) ([#7868)](https://github.com/paritytech/parity/pull/7868))
+  - Fix wallet import ([#7873)](https://github.com/paritytech/parity/pull/7873))
+- Backport Master CI PRs to Stable ([#7889)](https://github.com/paritytech/parity/pull/7889))
+  - Add binary identifiers and sha256sum to builds ([#7830)](https://github.com/paritytech/parity/pull/7830))
+  - Fix checksums and auto-update push ([#7846)](https://github.com/paritytech/parity/pull/7846))
+  - Update gitlab-build.sh ([#7855)](https://github.com/paritytech/parity/pull/7855))
+  - Fix installer binary names for macos and windows ([#7881)](https://github.com/paritytech/parity/pull/7881))
+  - Update gitlab-test.sh ([#7883)](https://github.com/paritytech/parity/pull/7883))
+  - Fix snapcraft nightly ([#7884)](https://github.com/paritytech/parity/pull/7884))
+  - Bump stable to 1.8.10
+  - Make track stable
+
+## Parity [v1.8.9](https://github.com/paritytech/parity/releases/tag/v1.8.9) (2018-02-02)
+
+Parity 1.8.9 is a bug-fix release to improve performance and stability. It restores ERC-20 token balances and adds additional bootnodes for the Ropsten test network.
+
+The full list of included changes:
+
+- Update gitlab-build.sh
+- Backports stable ([#7779](https://github.com/paritytech/parity/pull/7779))
+  - Bump stable to 1.8.9
+  - Update ropsten.json ([#7776](https://github.com/paritytech/parity/pull/7776))
+- Fix tokenAddress reference ([#7777](https://github.com/paritytech/parity/pull/7777))
+- Snapcraft push stable
+
+## Parity [v1.8.8](https://github.com/paritytech/parity/releases/tag/v1.8.8) (2018-02-01)
+
+Parity 1.8.8 is a bug-fix release to improve performance and stability. It restores ERC-20 token balances, improves networking, fixes database corruptions on client shutdown, and fixes issues with the `--password` command-line flag. Happy syncing!
+
+The full list of included changes:
+
+- Gitlab stable ([#7768](https://github.com/paritytech/parity/pull/7768))
+  - Fix snapcraft build for stable
+  - Initial support push snap packages to snapcraft.io
+  - Edge-devel
+- Snapcraft push ans fix build ([#7767](https://github.com/paritytech/parity/pull/7767))
+  - Fix snapcraft build for stable
+  - Initial support push snap packages to snapcraft.io
+  - Edge-devel
+- Remove snapcraft.yml from scripts
+- Resolve conflicts
+- Token filter balances (throttle) ([#7755](https://github.com/paritytech/parity/pull/7755))
+- Fix snapcraft build (stable) ([#7763](https://github.com/paritytech/parity/pull/7763))
+  - Fix snapcraft build for stable
+  - Fix snapcraft build (stable)
+- [Stable] Backports ([#7758](https://github.com/paritytech/parity/pull/7758))
+  - Filter-out nodes.json ([#7716](https://github.com/paritytech/parity/pull/7716))
+    - Filter-out nodes.json
+    - Network: sort node table nodes by failure ratio
+    - Network: fix node table tests
+    - Network: fit node failure percentage into buckets of 5%
+    - Network: consider number of attempts in sorting of node table
+    - Network: fix node table grumbles
+  - Fix client not being dropped on shutdown ([#7695](https://github.com/paritytech/parity/pull/7695))
+    - Parity: wait for client to drop on shutdown
+    - Parity: fix grumbles in shutdown wait
+    - Parity: increase shutdown timeouts
+  - Wrap --help output to 120 characters ([#7626](https://github.com/paritytech/parity/pull/7626))
+    - Update Clap dependency and remove workarounds
+    - WIP
+    - Remove line breaks in help messages for now
+    - Multiple values can only be separated by commas (closes [#7428](https://github.com/paritytech/parity/issues/7428))
+    - Grumbles; refactor repeating code; add constant
+    - Use a single Wrapper rather than allocate a new one for each call
+    - Wrap --help to 120 characters rather than 100 characters
+- Use explicit branch name in push ([#7757](https://github.com/paritytech/parity/pull/7757))
+- Bump stable to 1.8.8 ([#7752](https://github.com/paritytech/parity/pull/7752))
+- Fix js-release in stable ([#7682](https://github.com/paritytech/parity/pull/7682))
+- Update Info.plist
+- Fix conditions in gitlab-test ([#7675](https://github.com/paritytech/parity/pull/7675))
+- Remove cargo cache
+
 ## Parity [v1.8.7](https://github.com/paritytech/parity/releases/tag/v1.8.7) (2018-01-24)
 
 Parity 1.8.7 is the first stable release of the 1.8 channel. It includes various bug and stability fixes. Users on Kovan or other Aura-based networks are advised to upgrade as this release fixes an issue introduced with 1.8.6 and 1.7.12 that causes Proof-of-Authority nodes to stop synchronizing the chain.

@@ -17,17 +17,15 @@
 /// Validator set maintained in a contract, updated using `getValidators` method.
 
 use std::sync::{Weak, Arc};
-use futures::Future;
-use native_contracts::ValidatorSet as Provider;
 use hash::keccak;
 
-use ethereum_types::{H160, H256, U256, Address, Bloom};
-use parking_lot::{Mutex, RwLock};
+use ethereum_types::{H256, U256, Address, Bloom};
+use parking_lot::RwLock;
 
 use bytes::Bytes;
 use memory_cache::MemoryLruCache;
 use unexpected::Mismatch;
-use rlp::{UntrustedRlp, RlpStream};
+use rlp::{Rlp, RlpStream};
 use kvdb::DBValue;
 
 use client::EngineClient;
@@ -39,6 +37,8 @@ use receipt::Receipt;
 
 use super::{SystemCall, ValidatorSet};
 use super::simple_list::SimpleList;
+
+use_contract!(validator_set, "ValidatorSet", "res/contracts/validator_set.json");
 
 const MEMOIZE_CAPACITY: usize = 500;
 
@@ -52,31 +52,32 @@ lazy_static! {
 // state-dependent proofs for the safe contract:
 // only "first" proofs are such.
 struct StateProof {
-	header: Mutex<Header>,
-	provider: Provider,
+	contract_address: Address,
+	header: Header,
+	provider: validator_set::ValidatorSet,
 }
 
 impl ::engines::StateDependentProof<EthereumMachine> for StateProof {
 	fn generate_proof(&self, caller: &Call) -> Result<Vec<u8>, String> {
-		prove_initial(&self.provider, &*self.header.lock(), caller)
+		prove_initial(&self.provider, self.contract_address, &self.header, caller)
 	}
 
 	fn check_proof(&self, machine: &EthereumMachine, proof: &[u8]) -> Result<(), String> {
-		let (header, state_items) = decode_first_proof(&UntrustedRlp::new(proof))
+		let (header, state_items) = decode_first_proof(&Rlp::new(proof))
 			.map_err(|e| format!("proof incorrectly encoded: {}", e))?;
-		if &header != &*self.header.lock(){
+		if &header != &self.header {
 			return Err("wrong header in proof".into());
 		}
 
-		check_first_proof(machine, &self.provider, header, &state_items).map(|_| ())
+		check_first_proof(machine, &self.provider, self.contract_address, header, &state_items).map(|_| ())
 	}
 }
 
 /// The validator contract should have the following interface:
 pub struct ValidatorSafeContract {
-	pub address: Address,
+	contract_address: Address,
 	validators: RwLock<MemoryLruCache<H256, SimpleList>>,
-	provider: Provider,
+	provider: validator_set::ValidatorSet,
 	client: RwLock<Option<Weak<EngineClient>>>, // TODO [keorn]: remove
 }
 
@@ -92,7 +93,7 @@ fn encode_first_proof(header: &Header, state_items: &[Vec<u8>]) -> Bytes {
 }
 
 // check a first proof: fetch the validator set at the given block.
-fn check_first_proof(machine: &EthereumMachine, provider: &Provider, old_header: Header, state_items: &[DBValue])
+fn check_first_proof(machine: &EthereumMachine, provider: &validator_set::ValidatorSet, contract_address: Address, old_header: Header, state_items: &[DBValue])
 	-> Result<Vec<Address>, String>
 {
 	use transaction::{Action, Transaction};
@@ -117,15 +118,15 @@ fn check_first_proof(machine: &EthereumMachine, provider: &Provider, old_header:
 
 	// check state proof using given machine.
 	let number = old_header.number();
-	provider.get_validators(move |a, d| {
+	provider.functions().get_validators().call(&|data| {
 		let from = Address::default();
 		let tx = Transaction {
 			nonce: machine.account_start_nonce(number),
-			action: Action::Call(a),
+			action: Action::Call(contract_address),
 			gas: PROVIDED_GAS.into(),
 			gas_price: U256::default(),
 			value: U256::default(),
-			data: d,
+			data,
 		}.fake_sign(from);
 
 		let res = ::state::check_proof(
@@ -141,10 +142,10 @@ fn check_first_proof(machine: &EthereumMachine, provider: &Provider, old_header:
 			::state::ProvedExecution::Failed(e) => Err(format!("Failed call: {}", e)),
 			::state::ProvedExecution::Complete(e) => Ok(e.output),
 		}
-	}).wait()
+	}).map_err(|err| err.to_string())
 }
 
-fn decode_first_proof(rlp: &UntrustedRlp) -> Result<(Header, Vec<DBValue>), ::error::Error> {
+fn decode_first_proof(rlp: &Rlp) -> Result<(Header, Vec<DBValue>), ::error::Error> {
 	let header = rlp.val_at(0)?;
 	let state_items = rlp.at(1)?.iter().map(|x| {
 		let mut val = DBValue::new();
@@ -164,24 +165,25 @@ fn encode_proof(header: &Header, receipts: &[Receipt]) -> Bytes {
 	stream.drain().into_vec()
 }
 
-fn decode_proof(rlp: &UntrustedRlp) -> Result<(Header, Vec<Receipt>), ::error::Error> {
+fn decode_proof(rlp: &Rlp) -> Result<(Header, Vec<Receipt>), ::error::Error> {
 	Ok((rlp.val_at(0)?, rlp.list_at(1)?))
 }
 
 // given a provider and caller, generate proof. this will just be a state proof
 // of `getValidators`.
-fn prove_initial(provider: &Provider, header: &Header, caller: &Call) -> Result<Vec<u8>, String> {
+fn prove_initial(provider: &validator_set::ValidatorSet, contract_address: Address, header: &Header, caller: &Call) -> Result<Vec<u8>, String> {
 	use std::cell::RefCell;
 
 	let epoch_proof = RefCell::new(None);
 	let res = {
-		let caller = |a, d| {
-			let (result, proof) = caller(a, d)?;
+		let caller = |data| {
+			let (result, proof) = caller(contract_address, data)?;
 			*epoch_proof.borrow_mut() = Some(encode_first_proof(header, &proof));
 			Ok(result)
 		};
 
-		provider.get_validators(caller).wait()
+		provider.functions().get_validators().call(&caller)
+			.map_err(|err| err.to_string())
 	};
 
 	res.map(|validators| {
@@ -200,17 +202,18 @@ fn prove_initial(provider: &Provider, header: &Header, caller: &Call) -> Result<
 impl ValidatorSafeContract {
 	pub fn new(contract_address: Address) -> Self {
 		ValidatorSafeContract {
-			address: contract_address,
+			contract_address,
 			validators: RwLock::new(MemoryLruCache::new(MEMOIZE_CAPACITY)),
-			provider: Provider::new(contract_address),
+			provider: validator_set::ValidatorSet::default(),
 			client: RwLock::new(None),
 		}
 	}
 
 	/// Queries the state and gets the set of validators.
 	fn get_list(&self, caller: &Call) -> Option<SimpleList> {
-		let caller = move |a, d| caller(a, d).map(|x| x.0);
-		match self.provider.get_validators(caller).wait() {
+		let contract_address = self.contract_address;
+		let caller = move |data| caller(contract_address, data).map(|x| x.0);
+		match self.provider.functions().get_validators().call(&caller) {
 			Ok(new) => {
 				debug!(target: "engine", "Set of validators obtained: {:?}", new);
 				Some(SimpleList::new(new))
@@ -244,7 +247,7 @@ impl ValidatorSafeContract {
 			header.hash(), topics);
 
 		LogEntry {
-			address: self.address,
+			address: self.contract_address,
 			topics: topics,
 			data: Vec::new(), // irrelevant for bloom.
 		}.bloom()
@@ -254,52 +257,29 @@ impl ValidatorSafeContract {
 	// header the receipts correspond to.
 	fn extract_from_event(&self, bloom: Bloom, header: &Header, receipts: &[Receipt]) -> Option<SimpleList> {
 		let check_log = |log: &LogEntry| {
-			log.address == self.address &&
+			log.address == self.contract_address &&
 				log.topics.len() == 2 &&
 				log.topics[0] == *EVENT_NAME_HASH &&
 				log.topics[1] == *header.parent_hash()
 		};
 
-		let event = Provider::contract(&self.provider)
-			.event("InitiateChange".into())
-			.expect("Contract known ahead of time to have `InitiateChange` event; qed");
-
-		// iterate in reverse because only the _last_ change in a given
-		// block actually has any effect.
-		// the contract should only increment the nonce once.
+		let event = self.provider.events().initiate_change();
+		//// iterate in reverse because only the _last_ change in a given
+		//// block actually has any effect.
+		//// the contract should only increment the nonce once.
 		let mut decoded_events = receipts.iter()
 			.rev()
-			.filter(|r| &bloom & &r.log_bloom == bloom)
+			.filter(|r| r.log_bloom.contains_bloom(&bloom))
 			.flat_map(|r| r.logs.iter())
 			.filter(move |l| check_log(l))
 			.filter_map(|log| {
-				let topics = log.topics.iter().map(|x| x.0.clone()).collect();
-				event.parse_log((topics, log.data.clone()).into()).ok()
+				event.parse_log((log.topics.clone(), log.data.clone()).into()).ok()
 			});
 
+		// only last log is taken into account
 		match decoded_events.next() {
 			None => None,
-			Some(matched_event) => {
-
-				// decode log manually until the native contract generator is
-				// good enough to do it for us.
-				let validators_token = &matched_event.params[1].value;
-
-				let validators = validators_token.clone().to_array()
-					.and_then(|a| a.into_iter()
-						.map(|x| x.to_address().map(H160))
-						.collect::<Option<Vec<_>>>()
-					)
-					.map(SimpleList::new);
-
-				if validators.is_none() {
-					debug!(target: "engine", "Successfully decoded log turned out to be bad.");
-				}
-
-				trace!(target: "engine", "decoded log. validators: {:?}", validators);
-
-				validators
-			}
+			Some(matched_event) => Some(SimpleList::new(matched_event.new_set))
 		}
 	}
 }
@@ -320,14 +300,15 @@ impl ValidatorSet for ValidatorSafeContract {
 	}
 
 	fn on_epoch_begin(&self, _first: bool, _header: &Header, caller: &mut SystemCall) -> Result<(), ::error::Error> {
-		self.provider.finalize_change(caller)
-			.wait()
+		let data = self.provider.functions().finalize_change().input();
+		caller(self.contract_address, data)
+			.map(|_| ())
 			.map_err(::engines::EngineError::FailedSystemCall)
 			.map_err(Into::into)
 	}
 
 	fn genesis_epoch_data(&self, header: &Header, call: &Call) -> Result<Vec<u8>, String> {
-		prove_initial(&self.provider, header, call)
+		prove_initial(&self.provider, self.contract_address, header, call)
 	}
 
 	fn is_epoch_end(&self, _first: bool, _chain_head: &Header) -> Option<Vec<u8>> {
@@ -343,8 +324,9 @@ impl ValidatorSet for ValidatorSafeContract {
 		if first {
 			debug!(target: "engine", "signalling transition to fresh contract.");
 			let state_proof = Arc::new(StateProof {
-				header: Mutex::new(header.clone()),
-				provider: self.provider.clone(),
+				contract_address: self.contract_address,
+				header: header.clone(),
+				provider: validator_set::ValidatorSet::default(),
 			});
 			return ::engines::EpochChange::Yes(::engines::Proof::WithState(state_proof as Arc<_>));
 		}
@@ -375,7 +357,7 @@ impl ValidatorSet for ValidatorSafeContract {
 	fn epoch_set(&self, first: bool, machine: &EthereumMachine, _number: ::header::BlockNumber, proof: &[u8])
 		-> Result<(SimpleList, Option<H256>), ::error::Error>
 	{
-		let rlp = UntrustedRlp::new(proof);
+		let rlp = Rlp::new(proof);
 
 		if first {
 			trace!(target: "engine", "Recovering initial epoch set");
@@ -383,7 +365,7 @@ impl ValidatorSet for ValidatorSafeContract {
 			let (old_header, state_items) = decode_first_proof(&rlp)?;
 			let number = old_header.number();
 			let old_hash = old_header.hash();
-			let addresses = check_first_proof(machine, &self.provider, old_header, &state_items)
+			let addresses = check_first_proof(machine, &self.provider, self.contract_address, old_header, &state_items)
 				.map_err(::engines::EngineError::InsufficientProof)?;
 
 			trace!(target: "engine", "extracted epoch set at #{}: {} addresses",
@@ -396,7 +378,7 @@ impl ValidatorSet for ValidatorSafeContract {
 			// ensure receipts match header.
 			// TODO: optimize? these were just decoded.
 			let found_root = ::triehash::ordered_trie_root(
-				receipts.iter().map(::rlp::encode).map(|x| x.to_vec())
+				receipts.iter().map(::rlp::encode)
 			);
 			if found_root != *old_header.receipts_root() {
 				return Err(::error::BlockError::InvalidReceiptsRoot(
@@ -474,10 +456,10 @@ mod tests {
 	use spec::Spec;
 	use account_provider::AccountProvider;
 	use transaction::{Transaction, Action};
-	use client::BlockChainClient;
+	use client::{ChainInfo, BlockInfo, ImportBlock};
 	use ethkey::Secret;
 	use miner::MinerService;
-	use tests::helpers::{generate_dummy_client_with_spec_and_accounts, generate_dummy_client_with_spec_and_data};
+	use test_helpers::{generate_dummy_client_with_spec_and_accounts, generate_dummy_client_with_spec_and_data};
 	use super::super::ValidatorSet;
 	use super::{ValidatorSafeContract, EVENT_NAME_HASH};
 
@@ -502,7 +484,7 @@ mod tests {
 		client.engine().register_client(Arc::downgrade(&client) as _);
 		let validator_contract = "0000000000000000000000000000000000000005".parse::<Address>().unwrap();
 
-		client.miner().set_engine_signer(v1, "".into()).unwrap();
+		client.miner().set_author(v1, Some("".into())).unwrap();
 		// Remove "1" validator.
 		let tx = Transaction {
 			nonce: 0.into(),
@@ -530,11 +512,11 @@ mod tests {
 		assert_eq!(client.chain_info().best_block_number, 1);
 
 		// Switch to the validator that is still there.
-		client.miner().set_engine_signer(v0, "".into()).unwrap();
+		client.miner().set_author(v0, Some("".into())).unwrap();
 		::client::EngineClient::update_sealing(&*client);
 		assert_eq!(client.chain_info().best_block_number, 2);
 		// Switch back to the added validator, since the state is updated.
-		client.miner().set_engine_signer(v1, "".into()).unwrap();
+		client.miner().set_author(v1, Some("".into())).unwrap();
 		let tx = Transaction {
 			nonce: 2.into(),
 			gas_price: 0.into(),

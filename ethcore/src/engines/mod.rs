@@ -37,7 +37,7 @@ pub use self::tendermint::Tendermint;
 
 use std::sync::{Weak, Arc};
 use std::collections::{BTreeMap, HashMap};
-use std::fmt;
+use std::{fmt, error};
 
 use self::epoch::PendingTransition;
 
@@ -48,12 +48,11 @@ use error::Error;
 use header::{Header, BlockNumber};
 use snapshot::SnapshotComponents;
 use spec::CommonParams;
-use transaction::{UnverifiedTransaction, SignedTransaction};
+use transaction::{self, UnverifiedTransaction, SignedTransaction};
 
 use ethkey::Signature;
 use parity_machine::{Machine, LocalizedMachine as Localized};
 use ethereum_types::{H256, U256, Address};
-use semantic_version::SemanticVersion;
 use unexpected::{Mismatch, OutOfBounds};
 use bytes::Bytes;
 
@@ -100,6 +99,12 @@ impl fmt::Display for EngineError {
 		};
 
 		f.write_fmt(format_args!("Engine error ({})", msg))
+	}
+}
+
+impl error::Error for EngineError {
+	fn description(&self) -> &str {
+		"Engine error"
 	}
 }
 
@@ -176,15 +181,13 @@ pub enum EpochChange<M: Machine> {
 pub trait Engine<M: Machine>: Sync + Send {
 	/// The name of this engine.
 	fn name(&self) -> &str;
-	/// The version of this engine. Should be of the form
-	fn version(&self) -> SemanticVersion { SemanticVersion::new(0, 0, 0) }
 
 	/// Get access to the underlying state machine.
 	// TODO: decouple.
 	fn machine(&self) -> &M;
 
 	/// The number of additional header fields required for this engine.
-	fn seal_fields(&self) -> usize { 0 }
+	fn seal_fields(&self, _header: &M::Header) -> usize { 0 }
 
 	/// Additional engine-specific information for the user/developer concerning `header`.
 	fn extra_info(&self, _header: &M::Header) -> BTreeMap<String, String> { BTreeMap::new() }
@@ -245,11 +248,11 @@ pub trait Engine<M: Machine>: Sync + Send {
 	fn verify_block_unordered(&self, _header: &M::Header) -> Result<(), M::Error> { Ok(()) }
 
 	/// Phase 3 verification. Check block information against parent. Returns either a null `Ok` or a general error detailing the problem with import.
-	fn verify_block_family(&self, _header: &M::Header, _parent: &M::Header) -> Result<(), Error> { Ok(()) }
+	fn verify_block_family(&self, _header: &M::Header, _parent: &M::Header) -> Result<(), M::Error> { Ok(()) }
 
 	/// Phase 4 verification. Verify block header against potentially external data.
 	/// Should only be called when `register_client` has been called previously.
-	fn verify_block_external(&self, _header: &M::Header) -> Result<(), Error> { Ok(()) }
+	fn verify_block_external(&self, _header: &M::Header) -> Result<(), M::Error> { Ok(()) }
 
 	/// Genesis epoch data.
 	fn genesis_epoch_data<'a>(&self, _header: &M::Header, _state: &<M as Localized<'a>>::StateContext) -> Result<Vec<u8>, String> { Ok(Vec::new()) }
@@ -307,7 +310,7 @@ pub trait Engine<M: Machine>: Sync + Send {
 	fn set_signer(&self, _account_provider: Arc<AccountProvider>, _address: Address, _password: String) {}
 
 	/// Sign using the EngineSigner, to be used for consensus tx signing.
-	fn sign(&self, _hash: H256) -> Result<Signature, Error> { unimplemented!() }
+	fn sign(&self, _hash: H256) -> Result<Signature, M::Error> { unimplemented!() }
 
 	/// Add Client which can be used for sealing, potentially querying the state and sending messages.
 	fn register_client(&self, _client: Weak<M::EngineClient>) {}
@@ -327,6 +330,19 @@ pub trait Engine<M: Machine>: Sync + Send {
 	/// Whether this engine supports warp sync.
 	fn supports_warp(&self) -> bool {
 		self.snapshot_components().is_some()
+	}
+
+	/// Return a new open block header timestamp based on the parent timestamp.
+	fn open_block_header_timestamp(&self, parent_timestamp: u64) -> u64 {
+		use std::{time, cmp};
+
+		let now = time::SystemTime::now().duration_since(time::UNIX_EPOCH).unwrap_or_default();
+		cmp::max(now.as_secs() as u64, parent_timestamp + 1)
+	}
+
+	/// Check whether the parent timestamp is valid.
+	fn is_timestamp_valid(&self, header_timestamp: u64, parent_timestamp: u64) -> bool {
+		header_timestamp > parent_timestamp
 	}
 }
 
@@ -377,20 +393,29 @@ pub trait EthEngine: Engine<::machine::EthereumMachine> {
 	}
 
 	/// Verify a particular transaction is valid.
-	fn verify_transaction_unordered(&self, t: UnverifiedTransaction, header: &Header) -> Result<SignedTransaction, Error> {
+	///
+	/// Unordered verification doesn't rely on the transaction execution order,
+	/// i.e. it should only verify stuff that doesn't assume any previous transactions
+	/// has already been verified and executed.
+	///
+	/// NOTE This function consumes an `UnverifiedTransaction` and produces `SignedTransaction`
+	/// which implies that a heavy check of the signature is performed here.
+	fn verify_transaction_unordered(&self, t: UnverifiedTransaction, header: &Header) -> Result<SignedTransaction, transaction::Error> {
 		self.machine().verify_transaction_unordered(t, header)
 	}
 
-	/// Additional verification for transactions in blocks.
-	// TODO: Add flags for which bits of the transaction to check.
-	// TODO: consider including State in the params.
-	fn verify_transaction_basic(&self, t: &UnverifiedTransaction, header: &Header) -> Result<(), Error> {
+	/// Perform basic/cheap transaction verification.
+	///
+	/// This should include all cheap checks that can be done before
+	/// actually checking the signature, like chain-replay protection.
+	///
+	/// NOTE This is done before the signature is recovered so avoid
+	/// doing any state-touching checks that might be expensive.
+	///
+	/// TODO: Add flags for which bits of the transaction to check.
+	/// TODO: consider including State in the params.
+	fn verify_transaction_basic(&self, t: &UnverifiedTransaction, header: &Header) -> Result<(), transaction::Error> {
 		self.machine().verify_transaction_basic(t, header)
-	}
-
-	/// If this machine supports wasm.
-	fn supports_wasm(&self) -> bool {
-		self.machine().supports_wasm()
 	}
 
 	/// Additional information.
@@ -401,35 +426,3 @@ pub trait EthEngine: Engine<::machine::EthereumMachine> {
 
 // convenience wrappers for existing functions.
 impl<T> EthEngine for T where T: Engine<::machine::EthereumMachine> { }
-
-/// Common engine utilities
-pub mod common {
-	use block::ExecutedBlock;
-	use error::Error;
-	use trace::{Tracer, ExecutiveTracer, RewardType};
-	use state::CleanupMode;
-
-	use ethereum_types::U256;
-
-	/// Give reward and trace.
-	pub fn bestow_block_reward(block: &mut ExecutedBlock, reward: U256) -> Result<(), Error> {
-		let fields = block.fields_mut();
-		// Bestow block reward
-		let res = fields.state.add_balance(fields.header.author(), &reward, CleanupMode::NoEmpty)
-			.map_err(::error::Error::from)
-			.and_then(|_| fields.state.commit());
-
-		let block_author = fields.header.author().clone();
-		fields.traces.as_mut().map(move |traces| {
-  			let mut tracer = ExecutiveTracer::default();
-  			tracer.trace_reward(block_author, reward, RewardType::Block);
-  			traces.push(tracer.drain())
-		});
-
-		// Commit state so that we can actually figure out the state root.
-		if let Err(ref e) = res {
-			warn!("Encountered error on bestowing reward: {}", e);
-		}
-		res
-	}
-}

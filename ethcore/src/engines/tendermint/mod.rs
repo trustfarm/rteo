@@ -27,7 +27,7 @@ mod params;
 
 use std::sync::{Weak, Arc};
 use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
-use std::collections::{HashSet, BTreeMap};
+use std::collections::HashSet;
 use hash::keccak;
 use ethereum_types::{H256, H520, U128, U256, Address};
 use parking_lot::RwLock;
@@ -36,8 +36,8 @@ use client::EngineClient;
 use bytes::Bytes;
 use error::{Error, BlockError};
 use header::{Header, BlockNumber};
-use rlp::UntrustedRlp;
-use ethkey::{Message, public_to_address, recover, Signature};
+use rlp::Rlp;
+use ethkey::{self, Message, Signature};
 use account_provider::AccountProvider;
 use block::*;
 use engines::{Engine, Seal, EngineError, ConstructedVerifier};
@@ -48,7 +48,6 @@ use super::transition::TransitionHandler;
 use super::vote_collector::VoteCollector;
 use self::message::*;
 use self::params::TendermintParams;
-use semantic_version::SemanticVersion;
 use machine::{AuxiliaryData, EthereumMachine};
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy, Hash)]
@@ -119,7 +118,7 @@ impl <F> super::EpochVerifier<EthereumMachine> for EpochVerifier<F>
 
 		let mut addresses = HashSet::new();
 		let ref header_signatures_field = header.seal().get(2).ok_or(BlockError::InvalidSeal)?;
-		for rlp in UntrustedRlp::new(header_signatures_field).iter() {
+		for rlp in Rlp::new(header_signatures_field).iter() {
 			let signature: H520 = rlp.as_val()?;
 			let address = (self.recover)(&signature.into(), &message)?;
 
@@ -155,7 +154,7 @@ fn combine_proofs(signal_number: BlockNumber, set_proof: &[u8], finality_proof: 
 }
 
 fn destructure_proofs(combined: &[u8]) -> Result<(BlockNumber, &[u8], &[u8]), Error> {
-	let rlp = UntrustedRlp::new(combined);
+	let rlp = Rlp::new(combined);
 	Ok((
 		rlp.at(0)?.as_val()?,
 		rlp.at(1)?.data()?,
@@ -224,7 +223,7 @@ impl Tendermint {
 			(Some(validator), Ok(signature)) => {
 				let message_rlp = message_full_rlp(&signature, &vote_info);
 				let message = ConsensusMessage::new(signature, h, r, s, block_hash);
-				self.votes.vote(message.clone(), &validator);
+				self.votes.vote(message.clone(), validator);
 				debug!(target: "engine", "Generated {:?} as {}.", message, validator);
 				self.handle_valid_message(&message);
 
@@ -441,27 +440,14 @@ impl Tendermint {
 impl Engine<EthereumMachine> for Tendermint {
 	fn name(&self) -> &str { "Tendermint" }
 
-	fn version(&self) -> SemanticVersion { SemanticVersion::new(1, 0, 0) }
-
 	/// (consensus view, proposal signature, authority signatures)
-	fn seal_fields(&self) -> usize { 3 }
+	fn seal_fields(&self, _header: &Header) -> usize { 3 }
 
 	fn machine(&self) -> &EthereumMachine { &self.machine }
 
 	fn maximum_uncle_count(&self, _block: BlockNumber) -> usize { 0 }
 
 	fn maximum_uncle_age(&self) -> usize { 0 }
-
-	/// Additional engine-specific information for the user/developer concerning `header`.
-	fn extra_info(&self, header: &Header) -> BTreeMap<String, String> {
-		let message = ConsensusMessage::new_proposal(header).expect("Invalid header.");
-		map![
-			"signature".into() => message.signature.to_string(),
-			"height".into() => message.vote_step.height.to_string(),
-			"view".into() => message.vote_step.view.to_string(),
-			"block_hash".into() => message.block_hash.as_ref().map(ToString::to_string).unwrap_or("".into())
-		]
-	}
 
 	fn populate_from_parent(&self, header: &mut Header, parent: &Header) {
 		// Chain scoring: total weight is sqrt(U256::max_value())*height - view
@@ -496,7 +482,7 @@ impl Engine<EthereumMachine> for Tendermint {
 		if let Ok(signature) = self.sign(keccak(&vote_info)).map(Into::into) {
 			// Insert Propose vote.
 			debug!(target: "engine", "Submitting proposal {} at height {} view {}.", header.bare_hash(), height, view);
-			self.votes.vote(ConsensusMessage::new(signature, height, view, Step::Propose, bh), author);
+			self.votes.vote(ConsensusMessage::new(signature, height, view, Step::Propose, bh), *author);
 			// Remember the owned block.
 			*self.last_proposed.write() = header.bare_hash();
 			// Remember proposal for later seal submission.
@@ -518,19 +504,19 @@ impl Engine<EthereumMachine> for Tendermint {
 			EngineError::MalformedMessage(format!("{:?}", x))
 		}
 
-		let rlp = UntrustedRlp::new(rlp);
+		let rlp = Rlp::new(rlp);
 		let message: ConsensusMessage = rlp.as_val().map_err(fmt_err)?;
 		if !self.votes.is_old_or_known(&message) {
 			let msg_hash = keccak(rlp.at(1).map_err(fmt_err)?.as_raw());
-			let sender = public_to_address(
-				&recover(&message.signature.into(), &msg_hash).map_err(fmt_err)?
+			let sender = ethkey::public_to_address(
+				&ethkey::recover(&message.signature.into(), &msg_hash).map_err(fmt_err)?
 			);
 
 			if !self.is_authority(&sender) {
 				return Err(EngineError::NotAuthorized(sender));
 			}
 			self.broadcast_message(rlp.as_raw().to_vec());
-			if let Some(double) = self.votes.vote(message.clone(), &sender) {
+			if let Some(double) = self.votes.vote(message.clone(), sender) {
 				let height = message.vote_step.height as BlockNumber;
 				self.validators.report_malicious(&sender, height, height, ::rlp::encode(&double).into_vec());
 				return Err(EngineError::DoubleVote(sender));
@@ -545,7 +531,7 @@ impl Engine<EthereumMachine> for Tendermint {
 		if !epoch_begin { return Ok(()) }
 
 		// genesis is never a new block, but might as well check.
-		let header = block.fields().header.clone();
+		let header = block.header().clone();
 		let first = header.number() == 0;
 
 		let mut call = |to, data| {
@@ -564,7 +550,10 @@ impl Engine<EthereumMachine> for Tendermint {
 
 	/// Apply the block reward on finalisation of the block.
 	fn on_close_block(&self, block: &mut ExecutedBlock) -> Result<(), Error>{
-		::engines::common::bestow_block_reward(block, self.block_reward)
+		use parity_machine::WithBalances;
+		let author = *block.header().author();
+		self.machine.add_balance(block, &author, &self.block_reward)?;
+		self.machine.note_rewards(block, &[(author, self.block_reward)], &[])
 	}
 
 	fn verify_local_seal(&self, _header: &Header) -> Result<(), Error> {
@@ -573,7 +562,8 @@ impl Engine<EthereumMachine> for Tendermint {
 
 	fn verify_block_basic(&self, header: &Header) -> Result<(), Error> {
 		let seal_length = header.seal().len();
-		if seal_length == self.seal_fields() {
+		let expected_seal_fields = self.seal_fields(header);
+		if seal_length == expected_seal_fields {
 			// Either proposal or commit.
 			if (header.seal()[1] == ::rlp::NULL_RLP)
 				!= (header.seal()[2] == ::rlp::EMPTY_LIST_RLP) {
@@ -584,7 +574,7 @@ impl Engine<EthereumMachine> for Tendermint {
 			}
 		} else {
 			Err(BlockError::InvalidSealArity(
-				Mismatch { expected: self.seal_fields(), found: seal_length }
+				Mismatch { expected: expected_seal_fields, found: seal_length }
 			).into())
 		}
 	}
@@ -606,7 +596,7 @@ impl Engine<EthereumMachine> for Tendermint {
 			let precommit_hash = message_hash(vote_step.clone(), header.bare_hash());
 			let ref signatures_field = header.seal().get(2).expect("block went through verify_block_basic; block has .seal_fields() fields; qed");
 			let mut origins = HashSet::new();
-			for rlp in UntrustedRlp::new(signatures_field).iter() {
+			for rlp in Rlp::new(signatures_field).iter() {
 				let precommit = ConsensusMessage {
 					signature: rlp.as_val()?,
 					block_hash: Some(header.bare_hash()),
@@ -614,7 +604,7 @@ impl Engine<EthereumMachine> for Tendermint {
 				};
 				let address = match self.votes.get(&precommit) {
 					Some(a) => a,
-					None => public_to_address(&recover(&precommit.signature.into(), &precommit_hash)?),
+					None => ethkey::public_to_address(&ethkey::recover(&precommit.signature.into(), &precommit_hash)?),
 				};
 				if !self.validators.contains(header.parent_hash(), &address) {
 					return Err(EngineError::NotAuthorized(address.to_owned()).into());
@@ -669,7 +659,7 @@ impl Engine<EthereumMachine> for Tendermint {
 				let verifier = Box::new(EpochVerifier {
 					subchain_validators: list,
 					recover: |signature: &Signature, message: &Message| {
-						Ok(public_to_address(&::ethkey::recover(&signature, &message)?))
+						Ok(ethkey::public_to_address(&ethkey::recover(&signature, &message)?))
 					},
 				});
 
@@ -690,7 +680,7 @@ impl Engine<EthereumMachine> for Tendermint {
 	}
 
 	fn sign(&self, hash: H256) -> Result<Signature, Error> {
-		self.signer.read().sign(hash).map_err(Into::into)
+		Ok(self.signer.read().sign(hash)?)
 	}
 
 	fn snapshot_components(&self) -> Option<Box<::snapshot::SnapshotComponents>> {
@@ -718,7 +708,7 @@ impl Engine<EthereumMachine> for Tendermint {
 			*self.proposal.write() = proposal.block_hash.clone();
 			*self.proposal_parent.write() = header.parent_hash().clone();
 		}
-		self.votes.vote(proposal, &proposer);
+		self.votes.vote(proposal, proposer);
 		true
 	}
 
@@ -778,11 +768,14 @@ mod tests {
 	use ethereum_types::Address;
 	use bytes::Bytes;
 	use block::*;
-	use error::{Error, BlockError};
+	use error::{Error, ErrorKind, BlockError};
 	use header::Header;
-	use client::ChainNotify;
+	use client::ChainInfo;
 	use miner::MinerService;
-	use tests::helpers::*;
+	use test_helpers::{
+		TestNotify, get_temp_state_db, generate_dummy_client,
+		generate_dummy_client_with_spec_and_accounts
+	};
 	use account_provider::AccountProvider;
 	use spec::Spec;
 	use engines::{EthEngine, EngineError, Seal};
@@ -840,22 +833,10 @@ mod tests {
 		addr
 	}
 
-	#[derive(Default)]
-	struct TestNotify {
-		messages: RwLock<Vec<Bytes>>,
-	}
-
-	impl ChainNotify for TestNotify {
-		fn broadcast(&self, data: Vec<u8>) {
-			self.messages.write().push(data);
-		}
-	}
-
 	#[test]
 	fn has_valid_metadata() {
 		let engine = Spec::new_test_tendermint().engine;
 		assert!(!engine.name().is_empty());
-		assert!(engine.version().major >= 1);
 	}
 
 	#[test]
@@ -874,7 +855,7 @@ mod tests {
 		let verify_result = engine.verify_block_basic(&header);
 
 		match verify_result {
-			Err(Error::Block(BlockError::InvalidSealArity(_))) => {},
+			Err(Error(ErrorKind::Block(BlockError::InvalidSealArity(_)), _)) => {},
 			Err(_) => { panic!("should be block seal-arity mismatch error (got {:?})", verify_result); },
 			_ => { panic!("Should be error, got Ok"); },
 		}
@@ -904,7 +885,7 @@ mod tests {
 		header.set_seal(seal);
 		// Bad proposer.
 		match engine.verify_block_external(&header) {
-			Err(Error::Engine(EngineError::NotProposer(_))) => {},
+			Err(Error(ErrorKind::Engine(EngineError::NotProposer(_)), _)) => {},
 			_ => panic!(),
 		}
 
@@ -914,7 +895,7 @@ mod tests {
 		header.set_seal(seal);
 		// Not authority.
 		match engine.verify_block_external(&header) {
-			Err(Error::Engine(EngineError::NotAuthorized(_))) => {},
+			Err(Error(ErrorKind::Engine(EngineError::NotAuthorized(_)), _)) => {},
 			_ => panic!(),
 		};
 		engine.stop();
@@ -944,7 +925,7 @@ mod tests {
 
 		// One good signature is not enough.
 		match engine.verify_block_external(&header) {
-			Err(Error::Engine(EngineError::BadSealFieldSize(_))) => {},
+			Err(Error(ErrorKind::Engine(EngineError::BadSealFieldSize(_)), _)) => {},
 			_ => panic!(),
 		}
 
@@ -964,7 +945,7 @@ mod tests {
 
 		// One good and one bad signature.
 		match engine.verify_block_external(&header) {
-			Err(Error::Engine(EngineError::NotAuthorized(_))) => {},
+			Err(Error(ErrorKind::Engine(EngineError::NotAuthorized(_)), _)) => {},
 			_ => panic!(),
 		};
 		engine.stop();
@@ -1035,7 +1016,7 @@ mod tests {
 		let client = generate_dummy_client_with_spec_and_accounts(Spec::new_test_tendermint, Some(tap.clone()));
 		let engine = client.engine();
 
-		client.miner().set_engine_signer(v1.clone(), "1".into()).unwrap();
+		client.miner().set_author(v1.clone(), Some("1".into())).unwrap();
 
 		let notify = Arc::new(TestNotify::default());
 		client.add_notify(notify.clone());
@@ -1111,7 +1092,7 @@ mod tests {
 					} else if *s == signature0 {
 						Ok(voter)
 					} else {
-						Err(Error::Ethkey(EthkeyError::InvalidSignature))
+						Err(ErrorKind::Ethkey(EthkeyError::InvalidSignature).into())
 					}
 				}
 			},
@@ -1119,7 +1100,7 @@ mod tests {
 
 		// One good signature is not enough.
 		match epoch_verifier.verify_light(&header) {
-			Err(Error::Engine(EngineError::BadSealFieldSize(_))) => {},
+			Err(Error(ErrorKind::Engine(EngineError::BadSealFieldSize(_)), _)) => {},
 			_ => panic!(),
 		}
 
@@ -1136,7 +1117,7 @@ mod tests {
 
 		// One good and one bad signature.
 		match epoch_verifier.verify_light(&header) {
-			Err(Error::Ethkey(EthkeyError::InvalidSignature)) => {},
+			Err(Error(ErrorKind::Ethkey(EthkeyError::InvalidSignature), _)) => {},
 			_ => panic!(),
 		};
 

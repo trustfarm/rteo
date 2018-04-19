@@ -16,27 +16,40 @@
 
 //! Updater for Parity executables
 
-#[macro_use] extern crate log;
-extern crate ethcore_bytes as bytes;
-extern crate ethereum_types;
-extern crate parking_lot;
-extern crate parity_hash_fetch as hash_fetch;
-extern crate ethcore;
 extern crate ethabi;
-extern crate ethsync;
-extern crate futures;
-extern crate target_info;
-extern crate parity_reactor;
+extern crate ethcore;
+extern crate ethcore_bytes as bytes;
+extern crate ethcore_sync as sync;
+extern crate ethereum_types;
+extern crate keccak_hash as hash;
+extern crate parity_hash_fetch as hash_fetch;
 extern crate parity_version as version;
+extern crate parking_lot;
 extern crate path;
+extern crate rand;
 extern crate semver;
+extern crate target_info;
+
+#[macro_use]
+extern crate ethabi_contract;
+#[macro_use]
+extern crate ethabi_derive;
+#[macro_use]
+extern crate lazy_static;
+#[macro_use]
+extern crate log;
+
+#[cfg(test)]
+extern crate tempdir;
+
+#[cfg(test)]
+#[macro_use]
+extern crate matches;
 
 mod updater;
-mod operations;
 mod types;
-
 mod service;
 
-pub use service::{Service};
+pub use service::Service;
 pub use types::{ReleaseInfo, OperationsInfo, CapState, VersionInfo, ReleaseTrack};
 pub use updater::{Updater, UpdateFilter, UpdatePolicy};

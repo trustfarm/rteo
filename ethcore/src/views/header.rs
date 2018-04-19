@@ -16,39 +16,48 @@
 
 //! View onto block header rlp
 
-use hash::keccak;
-use ethereum_types::{H256, Bloom, U256, Address};
 use bytes::Bytes;
-use rlp::{self, Rlp};
+use ethereum_types::{H256, Bloom, U256, Address};
+use hash::keccak;
 use header::BlockNumber;
+use rlp::{self};
+use super::ViewRlp;
 
 /// View onto block header rlp.
 pub struct HeaderView<'a> {
-	rlp: Rlp<'a>
+	rlp: ViewRlp<'a>
 }
 
 impl<'a> HeaderView<'a> {
-	/// Creates new view onto header from raw bytes.
-	pub fn new(bytes: &'a [u8]) -> HeaderView<'a> {
+	/// Creates a new Header view from valid ViewRlp
+	/// Use the `view!` macro to create this view in order to capture debugging info.
+	///
+	/// # Example
+	///
+	/// ```
+	/// #[macro_use]
+	/// extern crate ethcore;
+	/// 
+	/// use ethcore::views::{HeaderView};
+	/// 
+	/// fn main() {
+	/// let bytes : &[u8] = &[];
+	/// let tx_view = view!(HeaderView, bytes);
+	/// }
+	/// ```
+	pub fn new(rlp: ViewRlp<'a>) -> HeaderView<'a> {
 		HeaderView {
-			rlp: Rlp::new(bytes)
-		}
-	}
-
-	/// Creates new view onto header from rlp.
-	pub fn new_from_rlp(rlp: Rlp<'a>) -> HeaderView<'a> {
-		HeaderView {
-			rlp: rlp
+			rlp
 		}
 	}
 
 	/// Returns header hash.
 	pub fn hash(&self) -> H256 {
-		keccak(self.rlp.as_raw())
+		keccak(self.rlp.rlp.as_raw())
 	}
 
 	/// Returns raw rlp.
-	pub fn rlp(&self) -> &Rlp<'a> { &self.rlp }
+	pub fn rlp(&self) -> &ViewRlp<'a> { &self.rlp }
 
 	/// Returns parent hash.
 	pub fn parent_hash(&self) -> H256 { self.rlp.val_at(0) }
@@ -102,16 +111,16 @@ impl<'a> HeaderView<'a> {
 	pub fn decode_seal(&self) -> Result<Vec<Bytes>, rlp::DecoderError> {
 		let seal = self.seal();
 		seal.into_iter()
-			.map(|s| rlp::UntrustedRlp::new(&s).data().map(|x| x.to_vec()))
+			.map(|s| rlp::Rlp::new(&s).data().map(|x| x.to_vec()))
 			.collect()
 	}
+
 }
 
 #[cfg(test)]
 mod tests {
-	use std::str::FromStr;
 	use rustc_hex::FromHex;
-	use ethereum_types::{H256, Bloom, U256, Address};
+	use ethereum_types::Bloom;
 	use super::HeaderView;
 
 	#[test]
@@ -121,19 +130,19 @@ mod tests {
 		let mix_hash = "a0a0349d8c3df71f1a48a9df7d03fd5f14aeee7d91332c009ecaff0a71ead405bd".from_hex().unwrap();
 		let nonce = "88ab4e252a7e8c2a23".from_hex().unwrap();
 
-		let view = HeaderView::new(&rlp);
-		assert_eq!(view.hash(), H256::from_str("2c9747e804293bd3f1a986484343f23bc88fd5be75dfe9d5c2860aff61e6f259").unwrap());
-		assert_eq!(view.parent_hash(), H256::from_str("d405da4e66f1445d455195229624e133f5baafe72b5cf7b3c36c12c8146e98b7").unwrap());
-		assert_eq!(view.uncles_hash(), H256::from_str("1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347").unwrap());
-		assert_eq!(view.author(), Address::from_str("8888f1f195afa192cfee860698584c030f4c9db1").unwrap());
-		assert_eq!(view.state_root(), H256::from_str("5fb2b4bfdef7b314451cb138a534d225c922fc0e5fbe25e451142732c3e25c25").unwrap());
-		assert_eq!(view.transactions_root(), H256::from_str("88d2ec6b9860aae1a2c3b299f72b6a5d70d7f7ba4722c78f2c49ba96273c2158").unwrap());
-		assert_eq!(view.receipts_root(), H256::from_str("07c6fdfa8eea7e86b81f5b0fc0f78f90cc19f4aa60d323151e0cac660199e9a1").unwrap());
+		let view = view!(HeaderView, &rlp);
+		assert_eq!(view.hash(), "2c9747e804293bd3f1a986484343f23bc88fd5be75dfe9d5c2860aff61e6f259".into());
+		assert_eq!(view.parent_hash(), "d405da4e66f1445d455195229624e133f5baafe72b5cf7b3c36c12c8146e98b7".into());
+		assert_eq!(view.uncles_hash(), "1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347".into());
+		assert_eq!(view.author(), "8888f1f195afa192cfee860698584c030f4c9db1".into());
+		assert_eq!(view.state_root(), "5fb2b4bfdef7b314451cb138a534d225c922fc0e5fbe25e451142732c3e25c25".into());
+		assert_eq!(view.transactions_root(), "88d2ec6b9860aae1a2c3b299f72b6a5d70d7f7ba4722c78f2c49ba96273c2158".into());
+		assert_eq!(view.receipts_root(), "07c6fdfa8eea7e86b81f5b0fc0f78f90cc19f4aa60d323151e0cac660199e9a1".into());
 		assert_eq!(view.log_bloom(), Bloom::default());
-		assert_eq!(view.difficulty(), U256::from(0x02_00_80));
+		assert_eq!(view.difficulty(), 0x020080.into());
 		assert_eq!(view.number(), 3);
-		assert_eq!(view.gas_limit(), U256::from(0x2f_ef_ba));
-		assert_eq!(view.gas_used(), U256::from(0x52_4d));
+		assert_eq!(view.gas_limit(), 0x2fefba.into());
+		assert_eq!(view.gas_used(), 0x524d.into());
 		assert_eq!(view.timestamp(), 0x56_8e_93_2a);
 		assert_eq!(view.extra_data(), vec![] as Vec<u8>);
 		assert_eq!(view.seal(), vec![mix_hash, nonce]);

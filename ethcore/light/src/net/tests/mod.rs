@@ -31,10 +31,11 @@ use provider::Provider;
 use request;
 use request::*;
 
-use rlp::*;
+use rlp::{Rlp, RlpStream};
 use ethereum_types::{H256, U256, Address};
 
 use std::sync::Arc;
+use std::time::Instant;
 
 // helper for encoding a single request into a packet.
 // panics on bad backreference.
@@ -404,7 +405,7 @@ fn get_block_receipts() {
 	// by the test client in that case.
 	let block_hashes: Vec<H256> = (0..1000)
 		.map(|i| provider.client.block_header(BlockId::Number(i)).unwrap().hash())
-		.filter(|hash| format!("{}", hash).starts_with("f"))
+		.filter(|hash| format!("{}", hash).starts_with("0xf"))
 		.take(10)
 		.collect();
 
@@ -661,8 +662,8 @@ fn id_guard() {
 
 	let mut pending_requests = RequestSet::default();
 
-	pending_requests.insert(req_id_1, req.clone(), 0.into(), ::time::SteadyTime::now());
-	pending_requests.insert(req_id_2, req, 1.into(), ::time::SteadyTime::now());
+	pending_requests.insert(req_id_1, req.clone(), 0.into(), Instant::now());
+	pending_requests.insert(req_id_2, req, 1.into(), Instant::now());
 
 	proto.peers.write().insert(peer_id, ::parking_lot::Mutex::new(Peer {
 		local_credits: flow_params.create_credits(),
@@ -670,7 +671,7 @@ fn id_guard() {
 		capabilities: capabilities.clone(),
 		remote_flow: Some((flow_params.create_credits(), (&*flow_params).clone())),
 		sent_head: provider.client.chain_info().best_block_hash,
-		last_update: ::time::SteadyTime::now(),
+		last_update: Instant::now(),
 		pending_requests: pending_requests,
 		failed_requests: Vec::new(),
 		propagated_transactions: Default::default(),
@@ -687,7 +688,7 @@ fn id_guard() {
 		stream.begin_list(2).append(&125usize).append(&3usize);
 
 		let packet = stream.out();
-		assert!(proto.response(&peer_id, &Expect::Nothing, UntrustedRlp::new(&packet)).is_err());
+		assert!(proto.response(&peer_id, &Expect::Nothing, Rlp::new(&packet)).is_err());
 	}
 
 	// next, do an unexpected response.
@@ -698,7 +699,7 @@ fn id_guard() {
 		stream.begin_list(0);
 
 		let packet = stream.out();
-		assert!(proto.response(&peer_id, &Expect::Nothing, UntrustedRlp::new(&packet)).is_err());
+		assert!(proto.response(&peer_id, &Expect::Nothing, Rlp::new(&packet)).is_err());
 	}
 
 	// lastly, do a valid (but empty) response.
@@ -709,7 +710,7 @@ fn id_guard() {
 		stream.begin_list(0);
 
 		let packet = stream.out();
-		assert!(proto.response(&peer_id, &Expect::Nothing, UntrustedRlp::new(&packet)).is_ok());
+		assert!(proto.response(&peer_id, &Expect::Nothing, Rlp::new(&packet)).is_ok());
 	}
 
 	let peers = proto.peers.read();

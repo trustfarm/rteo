@@ -28,7 +28,7 @@ use parking_lot::{Condvar, Mutex, RwLock};
 use io::*;
 use error::*;
 use engines::EthEngine;
-use service::*;
+use client::ClientIoMessage;
 
 use self::kind::{BlockLike, Kind};
 
@@ -472,17 +472,17 @@ impl<K: Kind> VerificationQueue<K> {
 		let h = input.hash();
 		{
 			if self.processing.read().contains_key(&h) {
-				return Err(ImportError::AlreadyQueued.into());
+				bail!(ErrorKind::Import(ImportErrorKind::AlreadyQueued));
 			}
 
 			let mut bad = self.verification.bad.lock();
 			if bad.contains(&h) {
-				return Err(ImportError::KnownBad.into());
+				bail!(ErrorKind::Import(ImportErrorKind::KnownBad));
 			}
 
 			if bad.contains(&input.parent_hash()) {
 				bad.insert(h.clone());
-				return Err(ImportError::KnownBad.into());
+				bail!(ErrorKind::Import(ImportErrorKind::KnownBad));
 			}
 		}
 
@@ -502,7 +502,7 @@ impl<K: Kind> VerificationQueue<K> {
 			Err(err) => {
 				match err {
 					// Don't mark future blocks as bad.
-					Error::Block(BlockError::TemporarilyInvalid(_)) => {},
+					Error(ErrorKind::Block(BlockError::TemporarilyInvalid(_)), _) => {},
 					_ => {
 						self.verification.bad.lock().insert(h.clone());
 					}
@@ -728,17 +728,17 @@ impl<K: Kind> Drop for VerificationQueue<K> {
 #[cfg(test)]
 mod tests {
 	use io::*;
-	use spec::*;
+	use spec::Spec;
 	use super::{BlockQueue, Config, State};
 	use super::kind::blocks::Unverified;
-	use tests::helpers::*;
+	use test_helpers::{get_good_dummy_block_seq, get_good_dummy_block};
 	use error::*;
-	use views::*;
+	use views::BlockView;
 
 	// create a test block queue.
 	// auto_scaling enables verifier adjustment.
 	fn get_test_queue(auto_scale: bool) -> BlockQueue {
-		let spec = get_test_spec();
+		let spec = Spec::new_test();
 		let engine = spec.engine;
 
 		let mut config = Config::default();
@@ -773,7 +773,7 @@ mod tests {
 		match duplicate_import {
 			Err(e) => {
 				match e {
-					Error::Import(ImportError::AlreadyQueued) => {},
+					Error(ErrorKind::Import(ImportErrorKind::AlreadyQueued), _) => {},
 					_ => { panic!("must return AlreadyQueued error"); }
 				}
 			}
@@ -785,7 +785,7 @@ mod tests {
 	fn returns_total_difficulty() {
 		let queue = get_test_queue(false);
 		let block = get_good_dummy_block();
-		let hash = BlockView::new(&block).header().hash().clone();
+		let hash = view!(BlockView, &block).header().hash().clone();
 		if let Err(e) = queue.import(Unverified::new(block)) {
 			panic!("error importing block that is valid by definition({:?})", e);
 		}
@@ -801,7 +801,7 @@ mod tests {
 	fn returns_ok_for_drained_duplicates() {
 		let queue = get_test_queue(false);
 		let block = get_good_dummy_block();
-		let hash = BlockView::new(&block).header().hash().clone();
+		let hash = view!(BlockView, &block).header().hash().clone();
 		if let Err(e) = queue.import(Unverified::new(block)) {
 			panic!("error importing block that is valid by definition({:?})", e);
 		}
@@ -827,7 +827,7 @@ mod tests {
 
 	#[test]
 	fn test_mem_limit() {
-		let spec = get_test_spec();
+		let spec = Spec::new_test();
 		let engine = spec.engine;
 		let mut config = Config::default();
 		config.max_mem_use = super::MIN_MEM_LIMIT;  // empty queue uses about 15000

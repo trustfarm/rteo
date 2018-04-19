@@ -26,7 +26,7 @@ use ethereum_types::{H256, H512};
 use network::{self, HostInfo, NetworkContext, NodeId, PeerId, ProtocolId, TimerToken};
 use ordered_float::OrderedFloat;
 use parking_lot::{Mutex, RwLock};
-use rlp::{DecoderError, RlpStream, UntrustedRlp};
+use rlp::{DecoderError, RlpStream, Rlp};
 
 use message::{Message, Error as MessageError};
 
@@ -36,7 +36,7 @@ mod tests;
 // how often periodic relays are. when messages are imported
 // we directly broadcast.
 const RALLY_TOKEN: TimerToken = 1;
-const RALLY_TIMEOUT_MS: u64 = 2500;
+const RALLY_TIMEOUT: Duration = Duration::from_millis(2500);
 
 /// Current protocol version.
 pub const PROTOCOL_VERSION: usize = 6;
@@ -45,7 +45,7 @@ pub const PROTOCOL_VERSION: usize = 6;
 pub const SUPPORTED_VERSIONS: &'static [u8] = &[PROTOCOL_VERSION as u8];
 
 // maximum tolerated delay between messages packets.
-const MAX_TOLERATED_DELAY_MS: u64 = 5000;
+const MAX_TOLERATED_DELAY: Duration = Duration::from_millis(5000);
 
 /// Number of packets. A bunch are reserved.
 pub const PACKET_COUNT: u8 = 128;
@@ -392,7 +392,7 @@ pub trait Context {
 	fn send(&self, PeerId, u8, Vec<u8>);
 }
 
-impl<'a> Context for NetworkContext<'a> {
+impl<T> Context for T where T: ?Sized + NetworkContext {
 	fn disconnect_peer(&self, peer: PeerId) {
 		NetworkContext::disconnect_peer(self, peer);
 	}
@@ -437,7 +437,7 @@ impl<T> Network<T> {
 	}
 
 	/// Post a message to the whisper network to be relayed.
-	pub fn post_message<C: Context>(&self, message: Message, context: &C) -> bool
+	pub fn post_message<C: ?Sized + Context>(&self, message: Message, context: &C) -> bool
 		where T: MessageHandler
 	{
 		let ok = self.messages.write().insert(message);
@@ -452,7 +452,7 @@ impl<T> Network<T> {
 }
 
 impl<T: MessageHandler> Network<T> {
-	fn rally<C: Context>(&self, io: &C) {
+	fn rally<C: ?Sized + Context>(&self, io: &C) {
 		// cannot be greater than 16MB (protocol limitation)
 		const MAX_MESSAGES_PACKET_SIZE: usize = 8 * 1024 * 1024;
 
@@ -469,7 +469,7 @@ impl<T: MessageHandler> Network<T> {
 			peer_data.note_evicted(&pruned_hashes);
 
 			let punish_timeout = |last_activity: &SystemTime| {
-				if *last_activity + Duration::from_millis(MAX_TOLERATED_DELAY_MS) <= now {
+				if *last_activity + MAX_TOLERATED_DELAY <= now {
 					debug!(target: "whisper", "Disconnecting peer {} due to excessive timeout.", peer_id);
 					io.disconnect_peer(*peer_id);
 				}
@@ -506,7 +506,7 @@ impl<T: MessageHandler> Network<T> {
 	}
 
 	// handle status packet from peer.
-	fn on_status(&self, peer: &PeerId, _status: UntrustedRlp)
+	fn on_status(&self, peer: &PeerId, _status: Rlp)
 		-> Result<(), Error>
 	{
 		let peers = self.peers.read();
@@ -523,7 +523,7 @@ impl<T: MessageHandler> Network<T> {
 		}
 	}
 
-	fn on_messages(&self, peer: &PeerId, message_packet: UntrustedRlp)
+	fn on_messages(&self, peer: &PeerId, message_packet: Rlp)
 		-> Result<(), Error>
 	{
 		let mut messages_vec = {
@@ -568,7 +568,7 @@ impl<T: MessageHandler> Network<T> {
 		Ok(())
 	}
 
-	fn on_pow_requirement(&self, peer: &PeerId, requirement: UntrustedRlp)
+	fn on_pow_requirement(&self, peer: &PeerId, requirement: Rlp)
 		-> Result<(), Error>
 	{
 		use byteorder::{ByteOrder, BigEndian};
@@ -604,7 +604,7 @@ impl<T: MessageHandler> Network<T> {
 		Ok(())
 	}
 
-	fn on_topic_filter(&self, peer: &PeerId, filter: UntrustedRlp)
+	fn on_topic_filter(&self, peer: &PeerId, filter: Rlp)
 		-> Result<(), Error>
 	{
 		let peers = self.peers.read();
@@ -627,7 +627,7 @@ impl<T: MessageHandler> Network<T> {
 		Ok(())
 	}
 
-	fn on_connect<C: Context>(&self, io: &C, peer: &PeerId) {
+	fn on_connect<C: ?Sized + Context>(&self, io: &C, peer: &PeerId) {
 		trace!(target: "whisper", "Connecting peer {}", peer);
 
 		let node_key = match io.node_key(*peer) {
@@ -660,8 +660,8 @@ impl<T: MessageHandler> Network<T> {
 		io.send(*peer, packet::STATUS, ::rlp::EMPTY_LIST_RLP.to_vec());
 	}
 
-	fn on_packet<C: Context>(&self, io: &C, peer: &PeerId, packet_id: u8, data: &[u8]) {
-		let rlp = UntrustedRlp::new(data);
+	fn on_packet<C: ?Sized + Context>(&self, io: &C, peer: &PeerId, packet_id: u8, data: &[u8]) {
+		let rlp = Rlp::new(data);
 		let res = match packet_id {
 			packet::STATUS => self.on_status(peer, rlp),
 			packet::MESSAGES => self.on_messages(peer, rlp),
@@ -685,7 +685,7 @@ impl<T: MessageHandler> Network<T> {
 impl<T: MessageHandler> ::network::NetworkProtocolHandler for Network<T> {
 	fn initialize(&self, io: &NetworkContext, host_info: &HostInfo) {
 		// set up broadcast timer (< 1s)
-		io.register_timer(RALLY_TOKEN, RALLY_TIMEOUT_MS)
+		io.register_timer(RALLY_TOKEN, RALLY_TIMEOUT)
 			.expect("Failed to initialize message rally timer");
 
 		*self.node_key.write() = host_info.id().clone();
@@ -708,7 +708,7 @@ impl<T: MessageHandler> ::network::NetworkProtocolHandler for Network<T> {
 		// rally with each peer and handle timeouts.
 		match timer {
 			RALLY_TOKEN => self.rally(io),
-			other => debug!(target: "whisper", "Timout triggered on unknown token {}", other),
+			other => debug!(target: "whisper", "Timeout triggered on unknown token {}", other),
 		}
 	}
 }

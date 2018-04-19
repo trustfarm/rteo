@@ -14,7 +14,7 @@ ethcore = { path = "../ethcore" }
 ethjson = { path = "../json" }
 ethcore-bytes = { path = "../util/bytes" }
 ethcore-transaction = { path = "../ethcore/transaction" }
-ethereum-types = "0.1"
+ethereum-types = "0.3"
 evm = { path = "../ethcore/evm" }
 panic_hook = { path = "../util/panic_hook" }
 rustc-hex = "1.0"
@@ -24,6 +24,7 @@ vm = { path = "../ethcore/vm" }
 
 [dev-dependencies]
 pretty_assertions = "0.1"
+tempdir = "0.3"
 
 [features]
 evm-debug = ["ethcore/evm-debug-tests"]

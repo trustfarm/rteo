@@ -21,7 +21,7 @@ Or join our community on Matrix:
 
 Official website: https://parity.io
 
-Be sure to check out [our wiki](https://paritytech.github.io/wiki/) and the [internal documentation](https://paritytech.github.io/parity/ethcore/index.html) for more information.
+Be sure to check out [our wiki](https://wiki.parity.io) for more information.
 
 ----
 
@@ -29,12 +29,14 @@ Be sure to check out [our wiki](https://paritytech.github.io/wiki/) and the [int
 
 Parity's goal is to be the fastest, lightest, and most secure Ethereum client. We are developing Parity using the sophisticated and cutting-edge Rust programming language. Parity is licensed under the GPLv3, and can be used for all your Ethereum needs.
 
-Parity comes with a built-in wallet. To access [Parity Wallet](http://web3.site/) simply go to http://web3.site/ (if you don't have access to the internet, but still want to use the service, you can also use http://127.0.0.1:8180/). It includes various functionality allowing you to:
+Parity comes with a built-in wallet, to install it please follow [these instructions](https://wiki.parity.io/Parity-Wallet). It includes various functionality allowing you to:
 
 - create and manage your Ethereum accounts;
 - manage your Ether and any Ethereum tokens;
 - create and register your own tokens;
 - and much more.
+
+From Parity Ethereum client version >=1.10, the User Interface (UI) is accessible in a separate application called Parity UI. To keep using the UI in the browser (deprecated), [follow these steps](https://wiki.parity.io/FAQ-Basic-Operations,-Configuration,-and-Synchronization.md#the-parity-ui-application-isnt-working-the-way-i-want).
 
 By default, Parity will also run a JSONRPC server on `127.0.0.1:8545` and a websockets server on `127.0.0.1:8546`. This is fully configurable and supports a number of APIs.
 
@@ -73,7 +75,11 @@ We recommend installing Rust through [rustup](https://www.rustup.rs/). If you do
 	$ rustup default stable-x86_64-pc-windows-msvc
   ```
 
-Once you have rustup, install Parity or download and build from source
+Once you have rustup installed, then you need to install:
+* [Perl](https://www.perl.org)
+* [Yasm](http://yasm.tortall.net)
+
+Make sure that these binaries are in your `PATH`. After that you should be able to build parity from source.
 
 ----
 
@@ -82,10 +88,20 @@ Once you have rustup, install Parity or download and build from source
 In any of the [supported Linux distros](https://snapcraft.io/docs/core/install):
 
 ```bash
-sudo snap install parity --edge
+sudo snap install parity
 ```
 
-(Note that this is an experimental and unstable release, at the moment)
+Or, if you want to contribute testing the upcoming release:
+
+```bash
+sudo snap install parity --beta
+```
+
+And to test the latest code landed into the master branch:
+
+```bash
+sudo snap install parity --edge
+```
 
 ----
 

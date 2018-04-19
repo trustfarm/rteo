@@ -14,7 +14,7 @@
 // You should have received a copy of the GNU General Public License
 // along with Parity.  If not, see <http://www.gnu.org/licenses/>.
 
-//! State database abstraction.
+//! State database abstraction. For more info, see the doc for `StateDB`
 
 use std::collections::{VecDeque, HashSet};
 use std::sync::Arc;
@@ -33,13 +33,17 @@ use bloom_journal::{Bloom, BloomJournal};
 use db::COL_ACCOUNT_BLOOM;
 use byteorder::{LittleEndian, ByteOrder};
 
-/// Number of bytes allocated in the memory for accounts bloom.
+/// Value used to initialize bloom bitmap size.
+///
+/// Bitmap size is the size in bytes (not bits) that will be allocated in memory.
 pub const ACCOUNT_BLOOM_SPACE: usize = 1048576;
 
-/// Estimated maximum number of accounts in memory bloom.
+/// Value used to initialize bloom items count.
+///
+/// Items count is an estimation of the maximum number of items to store.
 pub const DEFAULT_ACCOUNT_PRESET: usize = 1000000;
 
-/// Database key represening number of account hashes.
+/// Key for a value storing amount of hashes
 pub const ACCOUNT_BLOOM_HASHCOUNT_KEY: &'static [u8] = b"account_hash_count";
 
 const STATE_CACHE_BLOCKS: usize = 12;
@@ -175,7 +179,7 @@ impl StateDB {
 		bloom
 	}
 
-	/// Commit bloom to a database transaction
+	/// Commit blooms journal to the database transaction
 	pub fn commit_bloom(batch: &mut DBTransaction, journal: BloomJournal) -> Result<(), UtilError> {
 		assert!(journal.hash_functions <= 255);
 		batch.put(COL_ACCOUNT_BLOOM, ACCOUNT_BLOOM_HASHCOUNT_KEY, &[journal.hash_functions as u8]);
@@ -305,12 +309,12 @@ impl StateDB {
 		}
 	}
 
-	/// Returns immutable reference to underlying hashdb.
+	/// Conversion method to interpret self as `HashDB` reference
 	pub fn as_hashdb(&self) -> &HashDB {
 		self.db.as_hashdb()
 	}
 
-	/// Returns mutable reference to underlying hashdb.
+	/// Conversion method to interpret self as mutable `HashDB` reference
 	pub fn as_hashdb_mut(&mut self) -> &mut HashDB {
 		self.db.as_hashdb_mut()
 	}
@@ -436,12 +440,6 @@ impl state::Backend for StateDB {
 		cache.accounts.get_mut(addr).map(|a| a.as_ref().map(|a| a.clone_basic()))
 	}
 
-	fn get_cached_code(&self, hash: &H256) -> Option<Arc<Vec<u8>>> {
-		let mut cache = self.code_cache.lock();
-
-		cache.get_mut(hash).map(|code| code.clone())
-	}
-
 	fn get_cached<F, U>(&self, a: &Address, f: F) -> Option<U>
 		where F: FnOnce(Option<&mut Account>) -> U {
 		let mut cache = self.account_cache.lock();
@@ -449,6 +447,12 @@ impl state::Backend for StateDB {
 			return None;
 		}
 		cache.accounts.get_mut(a).map(|c| f(c.as_mut()))
+	}
+
+	fn get_cached_code(&self, hash: &H256) -> Option<Arc<Vec<u8>>> {
+		let mut cache = self.code_cache.lock();
+
+		cache.get_mut(hash).map(|code| code.clone())
 	}
 
 	fn note_non_null_account(&self, address: &Address) {
@@ -476,7 +480,7 @@ unsafe impl Sync for SyncAccount {}
 mod tests {
 	use ethereum_types::{H256, U256, Address};
 	use kvdb::DBTransaction;
-	use tests::helpers::*;
+	use test_helpers::get_temp_state_db;
 	use state::{Account, Backend};
 	use ethcore_logger::init_log;
 

@@ -39,8 +39,10 @@ extern crate node_health;
 extern crate parity_dapps_glue as parity_dapps;
 extern crate parity_hash_fetch as hash_fetch;
 extern crate parity_ui;
+extern crate parity_ui_deprecation;
 extern crate keccak_hash as hash;
 extern crate parity_version;
+extern crate registrar;
 
 #[macro_use]
 extern crate futures;
@@ -80,7 +82,7 @@ use parking_lot::RwLock;
 use fetch::Fetch;
 use node_health::NodeHealth;
 
-pub use hash_fetch::urlhint::ContractClient;
+pub use registrar::{RegistrarClient, Asynchronous};
 pub use node_health::SyncStatus;
 
 
@@ -108,7 +110,7 @@ impl Endpoints {
 	/// Returns a current list of app endpoints.
 	pub fn list(&self) -> Vec<apps::App> {
 		self.endpoints.read().iter().filter_map(|(ref k, ref e)| {
-			e.info().map(|ref info| apps::App::from_info(k, info))
+			e.info().map(|ref info| info.with_id(k))
 		}).collect()
 	}
 
@@ -155,9 +157,10 @@ impl Middleware {
 		pool: CpuPool,
 		health: NodeHealth,
 		dapps_domain: &str,
-		registrar: Arc<ContractClient>,
+		registrar: Arc<RegistrarClient<Call=Asynchronous>>,
 		sync_status: Arc<SyncStatus>,
 		fetch: F,
+		info_page_only: bool,
 	) -> Self {
 		let content_fetcher = Arc::new(apps::fetcher::ContentFetcher::new(
 			hash_fetch::urlhint::URLHintContract::new(registrar),
@@ -165,6 +168,23 @@ impl Middleware {
 			fetch.clone(),
 			pool.clone(),
 		).embeddable_on(None).allow_dapps(false));
+
+		if info_page_only {
+			let mut special = HashMap::default();
+			special.insert(router::SpecialEndpoint::Home, Some(apps::ui_deprecation(pool.clone())));
+
+			return Middleware {
+				endpoints: Default::default(),
+				router: router::Router::new(
+					content_fetcher,
+					None,
+					special,
+					None,
+					dapps_domain.to_owned(),
+				),
+			}
+		}
+
 		let special = {
 			let mut special = special_endpoints(
 				pool.clone(),
@@ -198,7 +218,7 @@ impl Middleware {
 		dapps_path: PathBuf,
 		extra_dapps: Vec<PathBuf>,
 		dapps_domain: &str,
-		registrar: Arc<ContractClient>,
+		registrar: Arc<RegistrarClient<Call=Asynchronous>>,
 		sync_status: Arc<SyncStatus>,
 		web_proxy_tokens: Arc<WebProxyTokens>,
 		fetch: F,

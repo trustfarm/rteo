@@ -25,11 +25,12 @@ use hash::{keccak, KECCAK_NULL_RLP};
 use ethereum_types::{U256, H256, Address};
 use bytes::ToPretty;
 use rlp::PayloadInfo;
-use ethcore::service::ClientService;
-use ethcore::client::{Mode, DatabaseCompactionProfile, VMType, BlockImportError, BlockChainClient, BlockId};
-use ethcore::error::ImportError;
+use ethcore::account_provider::AccountProvider;
+use ethcore::client::{Mode, DatabaseCompactionProfile, VMType, BlockImportError, Nonce, Balance, BlockChainClient, BlockId, BlockInfo, ImportBlock};
+use ethcore::error::{ImportErrorKind, BlockImportErrorKind};
 use ethcore::miner::Miner;
 use ethcore::verification::queue::VerifierSettings;
+use ethcore_service::ClientService;
 use cache::CacheConfig;
 use informant::{Informant, FullNodeInformantData, MillisecondDuration};
 use params::{SpecType, Pruning, Switch, tracing_switch_to_bool, fatdb_switch_to_bool};
@@ -37,6 +38,8 @@ use helpers::{to_client_config, execute_upgrades};
 use dir::Directories;
 use user_defaults::UserDefaults;
 use fdlimit;
+use ethcore_private_tx;
+use db;
 
 #[derive(Debug, PartialEq)]
 pub enum DataFormat {
@@ -184,32 +187,35 @@ fn execute_import_light(cmd: ImportBlockchain) -> Result<(), String> {
 	let client_path = db_dirs.client_path(algorithm);
 
 	// execute upgrades
-	let compaction = cmd.compaction.compaction_profile(db_dirs.db_root_path().as_path());
-	execute_upgrades(&cmd.dirs.base, &db_dirs, algorithm, compaction)?;
+	execute_upgrades(&cmd.dirs.base, &db_dirs, algorithm, &cmd.compaction)?;
 
 	// create dirs used by parity
 	cmd.dirs.create_dirs(false, false, false)?;
 
 	let cache = Arc::new(Mutex::new(
-		LightDataCache::new(Default::default(), ::time::Duration::seconds(0))
+		LightDataCache::new(Default::default(), Duration::new(0, 0))
 	));
 
 	let mut config = LightClientConfig {
 		queue: Default::default(),
 		chain_column: ::ethcore::db::COL_LIGHT_CHAIN,
-		db_cache_size: Some(cmd.cache_config.blockchain() as usize * 1024 * 1024),
-		db_compaction: compaction,
-		db_wal: cmd.wal,
 		verify_full: true,
 		check_seal: cmd.check_seal,
+		no_hardcoded_sync: true,
 	};
 
 	config.queue.max_mem_use = cmd.cache_config.queue() as usize * 1024 * 1024;
 	config.queue.verifier_settings = cmd.verifier_settings;
 
+	// initialize database.
+	let db = db::open_db(&client_path.to_str().expect("DB path could not be converted to string."),
+						 &cmd.cache_config,
+						 &cmd.compaction,
+						 cmd.wal)?;
+
 	// TODO: could epoch signals be avilable at the end of the file?
 	let fetch = ::light::client::fetch::unavailable();
-	let service = LightClientService::start(config, &spec, fetch, &client_path, cache)
+	let service = LightClientService::start(config, &spec, fetch, db, cache)
 		.map_err(|e| format!("Failed to start client: {}", e))?;
 
 	// free up the spec in memory.
@@ -241,7 +247,7 @@ fn execute_import_light(cmd: ImportBlockchain) -> Result<(), String> {
 	let do_import = |bytes: Vec<u8>| {
 		while client.queue_info().is_full() { sleep(Duration::from_secs(1)); }
 
-		let header: ::ethcore::header::Header = ::rlp::UntrustedRlp::new(&bytes).val_at(0)
+		let header: ::ethcore::header::Header = ::rlp::Rlp::new(&bytes).val_at(0)
 			.map_err(|e| format!("Bad block: {}", e))?;
 
 		if client.best_block_header().number() >= header.number() { return Ok(()) }
@@ -251,7 +257,7 @@ fn execute_import_light(cmd: ImportBlockchain) -> Result<(), String> {
 		}
 
 		match client.import_header(header) {
-			Err(BlockImportError::Import(ImportError::AlreadyInChain)) => {
+			Err(BlockImportError(BlockImportErrorKind::Import(ImportErrorKind::AlreadyInChain), _)) => {
 				trace!("Skipping block already in chain.");
 			}
 			Err(e) => {
@@ -337,7 +343,7 @@ fn execute_import(cmd: ImportBlockchain) -> Result<(), String> {
 	let snapshot_path = db_dirs.snapshot_path();
 
 	// execute upgrades
-	execute_upgrades(&cmd.dirs.base, &db_dirs, algorithm, cmd.compaction.compaction_profile(db_dirs.db_root_path().as_path()))?;
+	execute_upgrades(&cmd.dirs.base, &db_dirs, algorithm, &cmd.compaction)?;
 
 	// create dirs used by parity
 	cmd.dirs.create_dirs(false, false, false)?;
@@ -361,14 +367,23 @@ fn execute_import(cmd: ImportBlockchain) -> Result<(), String> {
 
 	client_config.queue.verifier_settings = cmd.verifier_settings;
 
+	let client_db = db::open_client_db(&client_path, &client_config)?;
+	let restoration_db_handler = db::restoration_db_handler(&client_path, &client_config);
+
 	// build client
 	let service = ClientService::start(
 		client_config,
 		&spec,
-		&client_path,
+		client_db,
 		&snapshot_path,
+		restoration_db_handler,
 		&cmd.dirs.ipc_path(),
-		Arc::new(Miner::with_spec(&spec)),
+		// TODO [ToDr] don't use test miner here
+		// (actually don't require miner at all)
+		Arc::new(Miner::new_for_tests(&spec, None)),
+		Arc::new(AccountProvider::transient_provider()),
+		Box::new(ethcore_private_tx::NoopEncryptor),
+		Default::default(),
 	).map_err(|e| format!("Client service error: {:?}", e))?;
 
 	// free up the spec in memory.
@@ -413,7 +428,7 @@ fn execute_import(cmd: ImportBlockchain) -> Result<(), String> {
 	let do_import = |bytes| {
 		while client.queue_info().is_full() { sleep(Duration::from_secs(1)); }
 		match client.import_block(bytes) {
-			Err(BlockImportError::Import(ImportError::AlreadyInChain)) => {
+			Err(BlockImportError(BlockImportErrorKind::Import(ImportErrorKind::AlreadyInChain), _)) => {
 				trace!("Skipping block already in chain.");
 			}
 			Err(e) => {
@@ -522,7 +537,7 @@ fn start_client(
 	let snapshot_path = db_dirs.snapshot_path();
 
 	// execute upgrades
-	execute_upgrades(&dirs.base, &db_dirs, algorithm, compaction.compaction_profile(db_dirs.db_root_path().as_path()))?;
+	execute_upgrades(&dirs.base, &db_dirs, algorithm, &compaction)?;
 
 	// create dirs used by parity
 	dirs.create_dirs(false, false, false)?;
@@ -544,13 +559,22 @@ fn start_client(
 		true,
 	);
 
+	let client_db = db::open_client_db(&client_path, &client_config)?;
+	let restoration_db_handler = db::restoration_db_handler(&client_path, &client_config);
+
 	let service = ClientService::start(
 		client_config,
 		&spec,
-		&client_path,
+		client_db,
 		&snapshot_path,
+		restoration_db_handler,
 		&dirs.ipc_path(),
-		Arc::new(Miner::with_spec(&spec)),
+		// It's fine to use test version here,
+		// since we don't care about miner parameters at all
+		Arc::new(Miner::new_for_tests(&spec, None)),
+		Arc::new(AccountProvider::transient_provider()),
+		Box::new(ethcore_private_tx::NoopEncryptor),
+		Default::default(),
 	).map_err(|e| format!("Client service error: {:?}", e))?;
 
 	drop(spec);
@@ -636,7 +660,7 @@ fn execute_export_state(cmd: ExportState) -> Result<(), String> {
 		}
 
 		for account in accounts.into_iter() {
-			let balance = client.balance(&account, at).unwrap_or_else(U256::zero);
+			let balance = client.balance(&account, at.into()).unwrap_or_else(U256::zero);
 			if cmd.min_balance.map_or(false, |m| balance < m) || cmd.max_balance.map_or(false, |m| balance > m) {
 				last = Some(account);
 				continue; //filtered out
@@ -645,17 +669,17 @@ fn execute_export_state(cmd: ExportState) -> Result<(), String> {
 			if i != 0 {
 				out.write(b",").expect("Write error");
 			}
-			out.write_fmt(format_args!("\n\"0x{}\": {{\"balance\": \"{:x}\", \"nonce\": \"{:x}\"", account.hex(), balance, client.nonce(&account, at).unwrap_or_else(U256::zero))).expect("Write error");
-			let code = client.code(&account, at).unwrap_or(None).unwrap_or_else(Vec::new);
+			out.write_fmt(format_args!("\n\"0x{:x}\": {{\"balance\": \"{:x}\", \"nonce\": \"{:x}\"", account, balance, client.nonce(&account, at).unwrap_or_else(U256::zero))).expect("Write error");
+			let code = client.code(&account, at.into()).unwrap_or(None).unwrap_or_else(Vec::new);
 			if !code.is_empty() {
-				out.write_fmt(format_args!(", \"code_hash\": \"0x{}\"", keccak(&code).hex())).expect("Write error");
+				out.write_fmt(format_args!(", \"code_hash\": \"0x{:x}\"", keccak(&code))).expect("Write error");
 				if cmd.code {
 					out.write_fmt(format_args!(", \"code\": \"{}\"", code.to_hex())).expect("Write error");
 				}
 			}
 			let storage_root = client.storage_root(&account, at).unwrap_or(KECCAK_NULL_RLP);
 			if storage_root != KECCAK_NULL_RLP {
-				out.write_fmt(format_args!(", \"storage_root\": \"0x{}\"", storage_root.hex())).expect("Write error");
+				out.write_fmt(format_args!(", \"storage_root\": \"0x{:x}\"", storage_root)).expect("Write error");
 				if cmd.storage {
 					out.write_fmt(format_args!(", \"storage\": {{")).expect("Write error");
 					let mut last_storage: Option<H256> = None;
@@ -669,7 +693,7 @@ fn execute_export_state(cmd: ExportState) -> Result<(), String> {
 							if last_storage.is_some() {
 								out.write(b",").expect("Write error");
 							}
-							out.write_fmt(format_args!("\n\t\"0x{}\": \"0x{}\"", key.hex(), client.storage_at(&account, &key, at).unwrap_or_else(Default::default).hex())).expect("Write error");
+							out.write_fmt(format_args!("\n\t\"0x{:x}\": \"0x{:x}\"", key, client.storage_at(&account, &key, at.into()).unwrap_or_else(Default::default))).expect("Write error");
 							last_storage = Some(key);
 						}
 					}

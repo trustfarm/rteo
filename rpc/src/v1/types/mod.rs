@@ -35,6 +35,7 @@ mod node_kind;
 mod provenance;
 mod receipt;
 mod rpc_settings;
+mod secretstore;
 mod sync;
 mod trace;
 mod trace_filter;
@@ -43,13 +44,14 @@ mod transaction_request;
 mod transaction_condition;
 mod uint;
 mod work;
+mod private_receipt;
 
 pub mod pubsub;
 
 pub use self::account_info::{AccountInfo, ExtAccountInfo, HwAccountInfo};
 pub use self::bytes::Bytes;
 pub use self::block::{RichBlock, Block, BlockTransactions, Header, RichHeader, Rich};
-pub use self::block_number::BlockNumber;
+pub use self::block_number::{BlockNumber, block_number_to_id};
 pub use self::call_request::CallRequest;
 pub use self::confirmations::{
 	ConfirmationPayload, ConfirmationRequest, ConfirmationResponse, ConfirmationResponseWithToken,
@@ -67,6 +69,7 @@ pub use self::node_kind::{NodeKind, Availability, Capability};
 pub use self::provenance::{Origin, DappId};
 pub use self::receipt::Receipt;
 pub use self::rpc_settings::RpcSettings;
+pub use self::secretstore::EncryptedDocumentKey;
 pub use self::sync::{
 	SyncStatus, SyncInfo, Peers, PeerInfo, PeerNetworkInfo, PeerProtocolsInfo,
 	TransactionStats, ChainStatus, EthProtocolInfo, PipProtocolInfo,
@@ -78,6 +81,7 @@ pub use self::transaction_request::TransactionRequest;
 pub use self::transaction_condition::TransactionCondition;
 pub use self::uint::{U128, U256, U64};
 pub use self::work::Work;
+pub use self::private_receipt::{PrivateTransactionReceipt, PrivateTransactionReceiptAndTransaction};
 
 // TODO [ToDr] Refactor to a proper type Vec of enums?
 /// Expected tracing type.

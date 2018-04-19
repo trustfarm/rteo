@@ -15,22 +15,23 @@
 // along with Parity.  If not, see <http://www.gnu.org/licenses/>.
 
 use ethereum_types::{H256, U256};
-use bytes::Bytes;
-use header::BlockNumber;
 
-/// Best block info.
-#[derive(Default)]
+use encoded;
+use header::{Header, BlockNumber};
+
+/// Contains information on a best block that is specific to the consensus engine.
+///
+/// For GHOST fork-choice rule it would typically describe the block with highest
+/// combined difficulty (usually the block with the highest block number).
+///
+/// Sometimes refered as 'latest block'.
 pub struct BestBlock {
-	/// Best block hash.
-	pub hash: H256,
-	/// Best block number.
-	pub number: BlockNumber,
-	/// Best block timestamp.
-	pub timestamp: u64,
+	/// Best block decoded header.
+	pub header: Header,
+	/// Best block uncompressed bytes.
+	pub block: encoded::Block,
 	/// Best block total difficulty.
 	pub total_difficulty: U256,
-	/// Best block uncompressed bytes
-	pub block: Bytes,
 }
 
 /// Best ancient block info. If the blockchain has a gap this keeps track of where it starts.

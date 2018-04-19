@@ -3,7 +3,7 @@ description = "Hardware wallet support."
 homepage = "http://parity.io"
 license = "GPL-3.0"
 name = "hardware-wallet"
-version = "1.9.0"
+version = "1.11.0"
 authors = ["Parity Technologies <admin@parity.io>"]
 
 [dependencies]
@@ -14,7 +14,7 @@ hidapi = { git = "https://github.com/paritytech/hidapi-rs" }
 libusb = { git = "https://github.com/paritytech/libusb-rs" }
 trezor-sys = { git = "https://github.com/paritytech/trezor-sys" }
 ethkey = { path = "../ethkey" }
-ethereum-types = "0.1"
+ethereum-types = "0.3"
 
 [dev-dependencies]
 rustc-hex = "1.0"

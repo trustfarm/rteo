@@ -88,33 +88,39 @@ enum Node {
 impl Node {
 	// load an inline node into memory or get the hash to do the lookup later.
 	fn inline_or_hash(node: &[u8], db: &HashDB, storage: &mut NodeStorage) -> NodeHandle {
-		let r = Rlp::new(node);
-		if r.is_data() && r.size() == 32 {
-			NodeHandle::Hash(r.as_val::<H256>())
-		} else {
-			let child = Node::from_rlp(node, db, storage);
-			NodeHandle::InMemory(storage.alloc(Stored::New(child)))
-		}
+		RlpNode::try_decode_hash(&node)
+			.map(NodeHandle::Hash)
+			.unwrap_or_else(|| {
+				let child = Node::from_rlp(node, db, storage);
+				NodeHandle::InMemory(storage.alloc(Stored::New(child)))
+			})
 	}
 
 	// decode a node from rlp without getting its children.
 	fn from_rlp(rlp: &[u8], db: &HashDB, storage: &mut NodeStorage) -> Self {
-		match RlpNode::decoded(rlp) {
+		match RlpNode::decoded(rlp).expect("rlp read from db; qed") {
 			RlpNode::Empty => Node::Empty,
 			RlpNode::Leaf(k, v) => Node::Leaf(k.encoded(true), DBValue::from_slice(&v)),
 			RlpNode::Extension(key, cb) => {
 				Node::Extension(key.encoded(false), Self::inline_or_hash(cb, db, storage))
 			}
-			RlpNode::Branch(children_rlp, val) => {
-				let mut children = empty_children();
-
-				for i in 0..16 {
+			RlpNode::Branch(ref children_rlp, val) => {
+				let mut child = |i| {
 					let raw = children_rlp[i];
 					let child_rlp = Rlp::new(raw);
-					if !child_rlp.is_empty()  {
-						children[i] = Some(Self::inline_or_hash(raw, db, storage));
+					if !child_rlp.is_empty() {
+						Some(Self::inline_or_hash(raw, db, storage))
+					} else {
+						None
 					}
-				}
+				};
+
+				let children = Box::new([
+					child(0), child(1), child(2), child(3),
+					child(4), child(5), child(6), child(7),
+					child(8), child(9), child(10), child(11),
+					child(12), child(13), child(14), child(15),
+				]);
 
 				Node::Branch(children, val.map(DBValue::from_slice))
 			}
@@ -294,7 +300,7 @@ pub struct TrieDBMut<'a> {
 	death_row: HashSet<H256>,
 	/// The number of hash operations this trie has performed.
 	/// Note that none are performed until changes are committed.
-	pub hash_count: usize,
+	hash_count: usize,
 }
 
 impl<'a> TrieDBMut<'a> {
@@ -949,7 +955,7 @@ mod tests {
 	use bytes::ToPretty;
 	use keccak::KECCAK_NULL_RLP;
 	use super::super::TrieMut;
-	use super::super::standardmap::*;
+	use standardmap::*;
 
 	fn populate_trie<'db>(db: &'db mut HashDB, root: &'db mut H256, v: &[(Vec<u8>, Vec<u8>)]) -> TrieDBMut<'db> {
 		let mut t = TrieDBMut::new(db, root);

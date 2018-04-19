@@ -2,15 +2,13 @@ use std::collections::HashMap;
 use ethereum_types::H256;
 use header::BlockNumber;
 use blockchain::block_info::BlockInfo;
-use blooms::BloomGroup;
-use super::extras::{BlockDetails, BlockReceipts, TransactionAddress, LogGroupPosition};
+use blockchain::extras::{BlockDetails, BlockReceipts, TransactionAddress};
+use blooms::{BloomGroup, GroupPosition};
 
 /// Block extras update info.
 pub struct ExtrasUpdate<'a> {
 	/// Block info.
 	pub info: BlockInfo,
-	/// Block timestamp.
-	pub timestamp: u64,
 	/// Current block uncompressed rlp bytes
 	pub block: &'a [u8],
 	/// Modified block hashes.
@@ -20,7 +18,7 @@ pub struct ExtrasUpdate<'a> {
 	/// Modified block receipts.
 	pub block_receipts: HashMap<H256, BlockReceipts>,
 	/// Modified blocks blooms.
-	pub blocks_blooms: HashMap<LogGroupPosition, BloomGroup>,
+	pub blocks_blooms: HashMap<GroupPosition, BloomGroup>,
 	/// Modified transaction addresses (None signifies removed transactions).
 	pub transactions_addresses: HashMap<H256, Option<TransactionAddress>>,
 }

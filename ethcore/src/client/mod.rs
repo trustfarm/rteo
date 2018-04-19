@@ -17,22 +17,28 @@
 //! Blockchain database client.
 
 mod ancient_import;
+mod client;
 mod config;
 mod error;
 mod evm_test_client;
+mod io_message;
 mod test_client;
 mod trace;
-mod client;
 
 pub use self::client::*;
 pub use self::config::{Mode, ClientConfig, DatabaseCompactionProfile, BlockChainConfig, VMType};
 pub use self::error::Error;
 pub use self::evm_test_client::{EvmTestClient, EvmTestError, TransactResult};
+pub use self::io_message::ClientIoMessage;
 pub use self::test_client::{TestBlockChainClient, EachBlockWith};
-pub use self::chain_notify::ChainNotify;
-pub use self::traits::{BlockChainClient, MiningBlockChainClient, EngineClient};
-
-pub use self::traits::ProvingBlockChainClient;
+pub use self::chain_notify::{ChainNotify, ChainMessageType};
+pub use self::traits::{
+    Nonce, Balance, ChainInfo, BlockInfo, ReopenBlock, PrepareOpenBlock, CallContract, TransactionInfo, RegistryInfo, ScheduleInfo, ImportSealedBlock, BroadcastProposalBlock, ImportBlock,
+    StateOrBlock, StateClient, Call, EngineInfo, AccountData, BlockChain, BlockProducer, SealedBlockImporter
+};
+//pub use self::private_notify::PrivateNotify;
+pub use state::StateInfo;
+pub use self::traits::{BlockChainClient, EngineClient, ProvingBlockChainClient};
 
 pub use types::ids::*;
 pub use types::trace_filter::Filter as TraceFilter;
@@ -42,9 +48,10 @@ pub use types::call_analytics::CallAnalytics;
 pub use executive::{Executed, Executive, TransactOptions};
 pub use vm::{LastHashes, EnvInfo};
 
-pub use error::{BlockImportError, TransactionImportError};
+pub use error::{BlockImportError, BlockImportErrorKind, TransactionImportError};
 pub use verification::VerifierType;
 
 mod traits;
 
 mod chain_notify;
+mod private_notify;

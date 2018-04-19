@@ -16,9 +16,10 @@
 
 use std::collections::{BTreeSet, BTreeMap, VecDeque};
 use std::fmt::{Debug, Formatter, Error as FmtError};
-use std::time;
+use std::time::Duration;
 use std::sync::Arc;
 use parking_lot::{Condvar, Mutex};
+use ethereum_types::Address;
 use ethkey::{Public, Secret};
 use key_server_cluster::{Error, NodeId, SessionId, KeyStorage, DocumentKeyShare, DocumentKeyShareVersion};
 use key_server_cluster::math;
@@ -77,10 +78,14 @@ struct SessionData {
 	// === Values, filled when session initialization just starts ===
 	/// Reference to the node, which has started this session.
 	master: Option<NodeId>,
-	/// Public key of the creator of the session.
-	author: Option<Public>,
+	/// Address of the creator of the session.
+	author: Option<Address>,
 
 	// === Values, filled when session initialization is completed ===
+	/// Session origin (if any).
+	origin: Option<Address>,
+	/// Is zero secret generation session?
+	is_zero: Option<bool>,
 	/// Threshold value for this DKG. Only `threshold + 1` will be able to collectively recreate joint secret,
 	/// and thus - decrypt message, encrypted with joint public.
 	threshold: Option<usize>,
@@ -103,7 +108,7 @@ struct SessionData {
 	/// Key share.
 	key_share: Option<Result<DocumentKeyShare, Error>>,
 	/// Jointly generated public key, which can be used to encrypt secret. Public.
-	joint_public_and_secret: Option<Result<(Public, Secret), Error>>,
+	joint_public_and_secret: Option<Result<(Public, Secret, Secret), Error>>,
 }
 
 /// Mutable node-specific data.
@@ -171,6 +176,32 @@ pub enum SessionState {
 	Failed,
 }
 
+pub enum InitializationNodes {
+	RandomNumbers(BTreeSet<NodeId>),
+	SpecificNumbers(BTreeMap<NodeId, Secret>)
+}
+
+impl InitializationNodes {
+	pub fn set(&self) -> BTreeSet<NodeId> {
+		match *self {
+			InitializationNodes::RandomNumbers(ref nodes) => nodes.clone(),
+			InitializationNodes::SpecificNumbers(ref nodes) => nodes.keys().cloned().collect(),
+		}
+	}
+}
+
+impl From<BTreeSet<NodeId>> for InitializationNodes {
+	fn from(nodes: BTreeSet<NodeId>) -> Self {
+		InitializationNodes::RandomNumbers(nodes)
+	}
+}
+
+impl From<BTreeMap<NodeId, Secret>> for InitializationNodes {
+	fn from(nodes: BTreeMap<NodeId, Secret>) -> Self {
+		InitializationNodes::SpecificNumbers(nodes)
+	}
+}
+
 impl SessionImpl {
 	/// Create new generation session.
 	pub fn new(params: SessionParams) -> Self {
@@ -188,6 +219,8 @@ impl SessionImpl {
 				simulate_faulty_behaviour: false,
 				master: None,
 				author: None,
+				origin: None,
+				is_zero: None,
 				threshold: None,
 				derived_point: None,
 				nodes: BTreeMap::new(),
@@ -221,21 +254,26 @@ impl SessionImpl {
 		self.data.lock().state.clone()
 	}
 
+	/// Get session origin.
+	pub fn origin(&self) -> Option<Address> {
+		self.data.lock().origin.clone()
+	}
+
 	/// Wait for session completion.
-	pub fn wait(&self, timeout: Option<time::Duration>) -> Result<Public, Error> {
+	pub fn wait(&self, timeout: Option<Duration>) -> Option<Result<Public, Error>> {
 		Self::wait_session(&self.completed, &self.data, timeout, |data| data.joint_public_and_secret.clone()
 			.map(|r| r.map(|r| r.0.clone())))
 	}
 
 	/// Get generated public and secret (if any).
-	pub fn joint_public_and_secret(&self) -> Option<Result<(Public, Secret), Error>> {
+	pub fn joint_public_and_secret(&self) -> Option<Result<(Public, Secret, Secret), Error>> {
 		self.data.lock().joint_public_and_secret.clone()
 	}
 
 	/// Start new session initialization. This must be called on master node.
-	pub fn initialize(&self, author: Public, threshold: usize, nodes: BTreeSet<NodeId>) -> Result<(), Error> {
-		check_cluster_nodes(self.node(), &nodes)?;
-		check_threshold(threshold, &nodes)?;
+	pub fn initialize(&self, origin: Option<Address>, author: Address, is_zero: bool, threshold: usize, nodes: InitializationNodes) -> Result<(), Error> {
+		check_cluster_nodes(self.node(), &nodes.set())?;
+		check_threshold(threshold, &nodes.set())?;
 
 		let mut data = self.data.lock();
 
@@ -247,11 +285,22 @@ impl SessionImpl {
 		// update state
 		data.master = Some(self.node().clone());
 		data.author = Some(author.clone());
+		data.origin = origin.clone();
+		data.is_zero = Some(is_zero);
 		data.threshold = Some(threshold);
-		for node_id in &nodes {
-			// generate node identification parameter
-			let node_id_number = math::generate_random_scalar()?;
-			data.nodes.insert(node_id.clone(), NodeData::with_id_number(node_id_number));
+		match nodes {
+			InitializationNodes::RandomNumbers(nodes) => {
+				for node_id in nodes {
+					// generate node identification parameter
+					let node_id_number = math::generate_random_scalar()?;
+					data.nodes.insert(node_id, NodeData::with_id_number(node_id_number));
+				}
+			},
+			InitializationNodes::SpecificNumbers(nodes) => {
+				for (node_id, node_id_number) in nodes {
+					data.nodes.insert(node_id, NodeData::with_id_number(node_id_number));
+				}
+			},
 		}
 
 		let mut visit_policy = EveryOtherNodeVisitor::new(self.node(), data.nodes.keys().cloned());
@@ -264,8 +313,10 @@ impl SessionImpl {
 				self.cluster.send(&next_node, Message::Generation(GenerationMessage::InitializeSession(InitializeSession {
 						session: self.id.clone().into(),
 						session_nonce: self.nonce,
+						origin: origin.map(Into::into),
 						author: author.into(),
 						nodes: data.nodes.iter().map(|(k, v)| (k.clone().into(), v.id_number.clone().into())).collect(),
+						is_zero: data.is_zero.expect("is_zero is filled in initialization phase; KD phase follows initialization phase; qed"),
 						threshold: data.threshold.expect("threshold is filled in initialization phase; KD phase follows initialization phase; qed"),
 						derived_point: derived_point.into(),
 					})))
@@ -275,7 +326,12 @@ impl SessionImpl {
 				self.complete_initialization(derived_point)?;
 				self.disseminate_keys()?;
 				self.verify_keys()?;
-				self.complete_generation()
+				self.complete_generation()?;
+
+				self.data.lock().state = SessionState::Finished;
+				self.completed.notify_all();
+
+				Ok(())
 			}
 		}
 	}
@@ -339,6 +395,8 @@ impl SessionImpl {
 		data.author = Some(message.author.clone().into());
 		data.state = SessionState::WaitingForInitializationComplete;
 		data.nodes = message.nodes.iter().map(|(id, number)| (id.clone().into(), NodeData::with_id_number(number.clone().into()))).collect();
+		data.origin = message.origin.clone().map(Into::into);
+		data.is_zero = Some(message.is_zero);
 		data.threshold = Some(message.threshold);
 
 		Ok(())
@@ -369,8 +427,10 @@ impl SessionImpl {
 			return self.cluster.send(&next_receiver, Message::Generation(GenerationMessage::InitializeSession(InitializeSession {
 					session: self.id.clone().into(),
 					session_nonce: self.nonce,
+					origin: data.origin.clone().map(Into::into),
 					author: data.author.as_ref().expect("author is filled on initialization step; confrm initialization follows initialization; qed").clone().into(),
 					nodes: data.nodes.iter().map(|(k, v)| (k.clone().into(), v.id_number.clone().into())).collect(),
+					is_zero: data.is_zero.expect("is_zero is filled in initialization phase; KD phase follows initialization phase; qed"),
 					threshold: data.threshold.expect("threshold is filled in initialization phase; KD phase follows initialization phase; qed"),
 					derived_point: message.derived_point.clone().into(),
 				})));
@@ -427,8 +487,9 @@ impl SessionImpl {
 		debug_assert!(data.nodes.contains_key(&sender));
 
 		// check message
+		let is_zero = data.is_zero.expect("is_zero is filled in initialization phase; KD phase follows initialization phase; qed");
 		let threshold = data.threshold.expect("threshold is filled in initialization phase; KD phase follows initialization phase; qed");
-		if message.publics.len() != threshold + 1 {
+		if !is_zero && message.publics.len() != threshold + 1 {
 			return Err(Error::InvalidMessage);
 		}
 
@@ -509,9 +570,12 @@ impl SessionImpl {
 			}
 
 			// calculate joint public key
-			let joint_public = {
+			let is_zero = data.is_zero.expect("is_zero is filled in initialization phase; KG phase follows initialization phase; qed");
+			let joint_public = if !is_zero {
 				let public_shares = data.nodes.values().map(|n| n.public_share.as_ref().expect("keys received on KD phase; KG phase follows KD phase; qed"));
 				math::compute_joint_public(public_shares)?
+			} else {
+				Default::default()
 			};
 
 			// save encrypted data to key storage
@@ -585,16 +649,23 @@ impl SessionImpl {
 
 		// pick 2t + 2 random numbers as polynomial coefficients for 2 polynoms
 		let threshold = data.threshold.expect("threshold is filled on initialization phase; KD phase follows initialization phase; qed");
-		let polynom1 = math::generate_random_polynom(threshold)?;
+		let is_zero = data.is_zero.expect("is_zero is filled on initialization phase; KD phase follows initialization phase; qed");
+		let mut polynom1 = math::generate_random_polynom(threshold)?;
+		if is_zero {
+			polynom1[0] = math::zero_scalar();
+		}
 		let polynom2 = math::generate_random_polynom(threshold)?;
 		data.polynom1 = Some(polynom1.clone());
 		data.secret_coeff = Some(polynom1[0].clone());
 
 		// compute t+1 public values
-		let publics = math::public_values_generation(threshold,
-			data.derived_point.as_ref().expect("keys dissemination occurs after derived point is agreed; qed"),
-			&polynom1,
-			&polynom2)?;
+		let publics = match is_zero {
+			false => math::public_values_generation(threshold,
+				data.derived_point.as_ref().expect("keys dissemination occurs after derived point is agreed; qed"),
+				&polynom1,
+				&polynom2)?,
+			true => Default::default(),
+		};
 
 		// compute secret values for every other node
 		for (node, node_data) in data.nodes.iter_mut() {
@@ -629,25 +700,35 @@ impl SessionImpl {
 
 		// key verification (KV) phase: check that other nodes have passed correct secrets
 		let threshold = data.threshold.expect("threshold is filled in initialization phase; KV phase follows initialization phase; qed");
-		let derived_point = data.derived_point.clone().expect("derived point generated on initialization phase; KV phase follows initialization phase; qed");
-		let number_id = data.nodes[self.node()].id_number.clone();
-		for (_	, node_data) in data.nodes.iter_mut().filter(|&(node_id, _)| node_id != self.node()) {
-			let secret1 = node_data.secret1.as_ref().expect("keys received on KD phase; KV phase follows KD phase; qed");
-			let secret2 = node_data.secret2.as_ref().expect("keys received on KD phase; KV phase follows KD phase; qed");
-			let publics = node_data.publics.as_ref().expect("keys received on KD phase; KV phase follows KD phase; qed");
-			let is_key_verification_ok = math::keys_verification(threshold, &derived_point, &number_id,
-				secret1, secret2, publics)?;
-
-			if !is_key_verification_ok {
-				// node has sent us incorrect values. In original ECDKG protocol we should have sent complaint here.
-				return Err(Error::InvalidMessage);
-			}
-		}
-
-		// calculate public share
+		let is_zero = data.is_zero.expect("is_zero is filled in initialization phase; KV phase follows initialization phase; qed");
 		let self_public_share = {
-			let self_secret_coeff = data.secret_coeff.as_ref().expect("secret_coeff is generated on KD phase; KG phase follows KD phase; qed");
-			math::compute_public_share(self_secret_coeff)?
+			if !is_zero { 
+				let derived_point = data.derived_point.clone().expect("derived point generated on initialization phase; KV phase follows initialization phase; qed");
+				let number_id = data.nodes[self.node()].id_number.clone();
+				for (_	, node_data) in data.nodes.iter_mut().filter(|&(node_id, _)| node_id != self.node()) {
+					let secret1 = node_data.secret1.as_ref().expect("keys received on KD phase; KV phase follows KD phase; qed");
+					let secret2 = node_data.secret2.as_ref().expect("keys received on KD phase; KV phase follows KD phase; qed");
+					let publics = node_data.publics.as_ref().expect("keys received on KD phase; KV phase follows KD phase; qed");
+					let is_key_verification_ok = math::keys_verification(threshold, &derived_point, &number_id,
+						secret1, secret2, publics)?;
+
+					if !is_key_verification_ok {
+						// node has sent us incorrect values. In original ECDKG protocol we should have sent complaint here.
+						return Err(Error::InvalidMessage);
+					}
+				}
+
+				// calculate public share
+				let self_public_share = {
+					let self_secret_coeff = data.secret_coeff.as_ref().expect("secret_coeff is generated on KD phase; KG phase follows KD phase; qed");
+					math::compute_public_share(self_secret_coeff)?
+				};
+
+				self_public_share
+			} else {
+				// TODO [Trust]: add verification when available
+				Default::default()
+			}
 		};
 
 		// calculate self secret + public shares
@@ -676,12 +757,16 @@ impl SessionImpl {
 		let mut data = self.data.lock();
 
 		// calculate joint public key
-		let joint_public = {
+		let is_zero = data.is_zero.expect("is_zero is filled in initialization phase; KG phase follows initialization phase; qed");
+		let joint_public = if !is_zero {
 			let public_shares = data.nodes.values().map(|n| n.public_share.as_ref().expect("keys received on KD phase; KG phase follows KD phase; qed"));
 			math::compute_joint_public(public_shares)?
+		} else {
+			Default::default()
 		};
 
 		// prepare key data
+		let secret_share = data.secret_share.as_ref().expect("secret_share is filled in KG phase; we are at the end of KG phase; qed").clone();
 		let encrypted_data = DocumentKeyShare {
 			author: data.author.as_ref().expect("author is filled in initialization phase; KG phase follows initialization phase; qed").clone(),
 			threshold: data.threshold.expect("threshold is filled in initialization phase; KG phase follows initialization phase; qed"),
@@ -690,7 +775,7 @@ impl SessionImpl {
 			encrypted_point: None,
 			versions: vec![DocumentKeyShareVersion::new(
 				data.nodes.iter().map(|(node_id, node_data)| (node_id.clone(), node_data.id_number.clone())).collect(),
-				data.secret_share.as_ref().expect("secret_share is filled in KG phase; we are at the end of KG phase; qed").clone(),
+				secret_share.clone(),
 			)],
 		};
 
@@ -698,7 +783,7 @@ impl SessionImpl {
 		let secret_coeff = data.secret_coeff.as_ref().expect("secret coeff is selected on initialization phase; current phase follows initialization; qed").clone();
 		if data.master.as_ref() != Some(self.node()) {
 			data.key_share = Some(Ok(encrypted_data));
-			data.joint_public_and_secret = Some(Ok((joint_public, secret_coeff)));
+			data.joint_public_and_secret = Some(Ok((joint_public, secret_coeff, secret_share)));
 			data.state = SessionState::WaitingForGenerationConfirmation;
 			return Ok(());
 		}
@@ -721,7 +806,7 @@ impl SessionImpl {
 			self_node.completion_confirmed = true;
 		}
 		data.key_share = Some(Ok(encrypted_data));
-		data.joint_public_and_secret = Some(Ok((joint_public, secret_coeff)));
+		data.joint_public_and_secret = Some(Ok((joint_public, secret_coeff, secret_share)));
 		data.state = SessionState::WaitingForGenerationConfirmation;
 
 		Ok(())
@@ -864,11 +949,12 @@ pub fn check_threshold(threshold: usize, nodes: &BTreeSet<NodeId>) -> Result<(),
 
 #[cfg(test)]
 pub mod tests {
-	use std::time;
 	use std::sync::Arc;
 	use std::collections::{BTreeSet, BTreeMap, VecDeque};
+	use std::time::Duration;
 	use tokio_core::reactor::Core;
-	use ethkey::{Random, Generator, Public, KeyPair};
+	use ethereum_types::Address;
+	use ethkey::{Random, Generator, KeyPair};
 	use key_server_cluster::{NodeId, SessionId, Error, KeyStorage, DummyKeyStorage};
 	use key_server_cluster::message::{self, Message, GenerationMessage};
 	use key_server_cluster::cluster::tests::{DummyCluster, make_clusters, run_clusters, loop_until, all_connections_established};
@@ -996,7 +1082,7 @@ pub mod tests {
 
 	fn make_simple_cluster(threshold: usize, num_nodes: usize) -> Result<(SessionId, NodeId, NodeId, MessageLoop), Error> {
 		let l = MessageLoop::new(num_nodes);
-		l.master().initialize(Public::default(), threshold, l.nodes.keys().cloned().collect())?;
+		l.master().initialize(Default::default(), Default::default(), false, threshold, l.nodes.keys().cloned().collect::<BTreeSet<_>>().into())?;
 
 		let session_id = l.session_id.clone();
 		let master_id = l.master().node().clone();
@@ -1007,7 +1093,7 @@ pub mod tests {
 	#[test]
 	fn initializes_in_cluster_of_single_node() {
 		let l = MessageLoop::new(1);
-		assert!(l.master().initialize(Public::default(), 0, l.nodes.keys().cloned().collect()).is_ok());
+		assert!(l.master().initialize(Default::default(), Default::default(), false, 0, l.nodes.keys().cloned().collect::<BTreeSet<_>>().into()).is_ok());
 	}
 
 	#[test]
@@ -1022,7 +1108,7 @@ pub mod tests {
 			nonce: Some(0),
 		});
 		let cluster_nodes: BTreeSet<_> = (0..2).map(|_| math::generate_random_point().unwrap()).collect();
-		assert_eq!(session.initialize(Public::default(), 0, cluster_nodes).unwrap_err(), Error::InvalidNodesConfiguration);
+		assert_eq!(session.initialize(Default::default(), Default::default(), false, 0, cluster_nodes.into()).unwrap_err(), Error::InvalidNodesConfiguration);
 	}
 
 	#[test]
@@ -1036,7 +1122,8 @@ pub mod tests {
 	#[test]
 	fn fails_to_initialize_when_already_initialized() {
 		let (_, _, _, l) = make_simple_cluster(0, 2).unwrap();
-		assert_eq!(l.master().initialize(Public::default(), 0, l.nodes.keys().cloned().collect()).unwrap_err(), Error::InvalidStateForRequest);
+		assert_eq!(l.master().initialize(Default::default(), Default::default(), false, 0, l.nodes.keys().cloned().collect::<BTreeSet<_>>().into()).unwrap_err(),
+			Error::InvalidStateForRequest);
 	}
 
 	#[test]
@@ -1115,8 +1202,10 @@ pub mod tests {
 		assert_eq!(l.first_slave().on_initialize_session(m, &message::InitializeSession {
 			session: sid.into(),
 			session_nonce: 0,
-			author: Public::default().into(),
+			origin: None,
+			author: Address::default().into(),
 			nodes: nodes.into_iter().map(|(k, v)| (k.into(), v.into())).collect(),
+			is_zero: false,
 			threshold: 0,
 			derived_point: math::generate_random_point().unwrap().into(),
 		}).unwrap_err(), Error::InvalidNodesConfiguration);
@@ -1131,8 +1220,10 @@ pub mod tests {
 		assert_eq!(l.first_slave().on_initialize_session(m, &message::InitializeSession {
 			session: sid.into(),
 			session_nonce: 0,
-			author: Public::default().into(),
+			origin: None,
+			author: Address::default().into(),
 			nodes: nodes.into_iter().map(|(k, v)| (k.into(), v.into())).collect(),
+			is_zero: false,
 			threshold: 2,
 			derived_point: math::generate_random_point().unwrap().into(),
 		}).unwrap_err(), Error::InvalidThreshold);
@@ -1273,7 +1364,7 @@ pub mod tests {
 		let test_cases = [(0, 5), (2, 5), (3, 5)];
 		for &(threshold, num_nodes) in &test_cases {
 			let mut l = MessageLoop::new(num_nodes);
-			l.master().initialize(Public::default(), threshold, l.nodes.keys().cloned().collect()).unwrap();
+			l.master().initialize(Default::default(), Default::default(), false, threshold, l.nodes.keys().cloned().collect::<BTreeSet<_>>().into()).unwrap();
 			assert_eq!(l.nodes.len(), num_nodes);
 
 			// let nodes do initialization + keys dissemination
@@ -1305,6 +1396,9 @@ pub mod tests {
 
 	#[test]
 	fn encryption_session_works_over_network() {
+		const CONN_TIMEOUT: Duration = Duration::from_millis(300);
+		const SESSION_TIMEOUT: Duration = Duration::from_millis(1000);
+
 		let test_cases = [(1, 3)];
 		for &(threshold, num_nodes) in &test_cases {
 			let mut core = Core::new().unwrap();
@@ -1314,12 +1408,12 @@ pub mod tests {
 			run_clusters(&clusters);
 
 			// establish connections
-			loop_until(&mut core, time::Duration::from_millis(300), || clusters.iter().all(all_connections_established));
+			loop_until(&mut core, CONN_TIMEOUT, || clusters.iter().all(all_connections_established));
 
 			// run session to completion
 			let session_id = SessionId::default();
-			let session = clusters[0].client().new_generation_session(session_id, Public::default(), threshold).unwrap();
-			loop_until(&mut core, time::Duration::from_millis(1000), || session.joint_public_and_secret().is_some());
+			let session = clusters[0].client().new_generation_session(session_id, Default::default(), Default::default(), threshold).unwrap();
+			loop_until(&mut core, SESSION_TIMEOUT, || session.joint_public_and_secret().is_some());
 		}
 	}
 

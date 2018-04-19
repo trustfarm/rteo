@@ -20,31 +20,20 @@ use std::sync::Arc;
 use rustc_hex::ToHex;
 use mime::{self, Mime};
 use mime_guess;
-use hash::keccak;
 
 use futures::{future, Future};
-use native_contracts::{Registry, Urlhint};
-use ethereum_types::{H160, H256, Address};
-use bytes::Bytes;
+use futures::future::Either;
+use ethereum_types::{H256, Address};
+use registrar::{Registrar, RegistrarClient, Asynchronous};
 
-/// Boxed future that can be shared between threads.
-/// TODO [ToDr] Use concrete types!
-pub type BoxFuture<A, B> = Box<Future<Item = A, Error = B> + Send>;
+use_contract!(urlhint, "Urlhint", "res/urlhint.json");
 
 const COMMIT_LEN: usize = 20;
+const GITHUB_HINT: &'static str = "githubhint";
 /// GithubHint entries with commit set as `0x0..01` should be treated
 /// as Github Dapp, downloadable zip files, than can be extracted, containing
 /// the manifest.json file along with the dapp
 static GITHUB_DAPP_COMMIT: &[u8; COMMIT_LEN] = &[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
-
-/// RAW Contract interface.
-/// Should execute transaction using current blockchain state.
-pub trait ContractClient: Send + Sync {
-	/// Get registrar address
-	fn registrar(&self) -> Result<Address, String>;
-	/// Call Contract
-	fn call(&self, address: Address, data: Bytes) -> BoxFuture<Bytes, String>;
-}
 
 /// Github-hosted dapp.
 #[derive(Debug, PartialEq)]
@@ -106,23 +95,22 @@ pub enum URLHintResult {
 /// URLHint Contract interface
 pub trait URLHint: Send + Sync {
 	/// Resolves given id to registrar entry.
-	fn resolve(&self, id: Bytes) -> BoxFuture<Option<URLHintResult>, String>;
+	fn resolve(&self, id: H256) -> Box<Future<Item = Option<URLHintResult>, Error = String> + Send>;
 }
 
 /// `URLHintContract` API
-#[derive(Clone)]
 pub struct URLHintContract {
-	urlhint: Arc<Urlhint>,
-	registrar: Registry,
-	client: Arc<ContractClient>,
+	urlhint: urlhint::Urlhint,
+	registrar: Registrar,
+	client: Arc<RegistrarClient<Call=Asynchronous>>,
 }
 
 impl URLHintContract {
 	/// Creates new `URLHintContract`
-	pub fn new(client: Arc<ContractClient>) -> Self {
+		pub fn new(client: Arc<RegistrarClient<Call=Asynchronous>>) -> Self {
 		URLHintContract {
-			urlhint: Arc::new(Urlhint::new(Default::default())),
-			registrar: Registry::new(Default::default()),
+			urlhint: urlhint::Urlhint::default(),
+			registrar: Registrar::new(client.clone()),
 			client: client,
 		}
 	}
@@ -137,7 +125,7 @@ fn get_urlhint_content(account_slash_repo: String, owner: Address) -> Content {
 	}
 }
 
-fn decode_urlhint_output(output: (String, H160, Address)) -> Option<URLHintResult> {
+fn decode_urlhint_output(output: (String, [u8; 20], Address)) -> Option<URLHintResult> {
 	let (account_slash_repo, commit, owner) = output;
 
 	if owner == Address::default() {
@@ -173,36 +161,21 @@ fn decode_urlhint_output(output: (String, H160, Address)) -> Option<URLHintResul
 }
 
 impl URLHint for URLHintContract {
-	fn resolve(&self, id: Bytes) -> BoxFuture<Option<URLHintResult>, String> {
-		use futures::future::Either;
-
-		let do_call = |_, data| {
-			let addr = match self.client.registrar() {
-				Ok(addr) => addr,
-				Err(e) => return Box::new(future::err(e))
-					as BoxFuture<Vec<u8>, _>,
-			};
-
-			self.client.call(addr, data)
-		};
-
-		let urlhint = self.urlhint.clone();
+	fn resolve(&self, id: H256) -> Box<Future<Item = Option<URLHintResult>, Error = String> + Send> {
+		let entries = self.urlhint.functions().entries();
 		let client = self.client.clone();
-		Box::new(self.registrar.get_address(do_call, keccak("githubhint"), "A".into())
-			.map(|addr| if addr == Address::default() { None } else { Some(addr) })
-			.and_then(move |address| {
-				let mut fixed_id = [0; 32];
-				let len = ::std::cmp::min(32, id.len());
-				fixed_id[..len].copy_from_slice(&id[..len]);
 
-				match address {
-					None => Either::A(future::ok(None)),
-					Some(address) => {
-						let do_call = move |_, data| client.call(address, data);
-						Either::B(urlhint.entries(do_call, H256(fixed_id)).map(decode_urlhint_output))
-					}
-				}
-			}))
+		let future = self.registrar.get_address(GITHUB_HINT)
+			.and_then(move |addr| if !addr.is_zero() {
+				let data = entries.input(id);
+				let result = client.call_contract(addr, data)
+					.and_then(move |output| entries.output(&output).map_err(|e| e.to_string()))
+					.map(decode_urlhint_output);
+				Either::B(result)
+			} else {
+				Either::A(future::ok(None))
+		});
+		Box::new(future)
 	}
 }
 
@@ -265,12 +238,14 @@ pub mod tests {
 		}
 	}
 
-	impl ContractClient for FakeRegistrar {
-		fn registrar(&self) -> Result<Address, String> {
+	impl RegistrarClient for FakeRegistrar {
+		type Call = Asynchronous;
+
+		fn registrar_address(&self) -> Result<Address, String> {
 			Ok(REGISTRAR.parse().unwrap())
 		}
 
-		fn call(&self, address: Address, data: Bytes) -> BoxFuture<Bytes, String> {
+		fn call_contract(&self, address: Address, data: Bytes) -> Self::Call {
 			self.calls.lock().push((address.to_hex(), data.to_hex()));
 			let res = self.responses.lock().remove(0);
 			Box::new(res.into_future())
@@ -283,7 +258,7 @@ pub mod tests {
 		let registrar = FakeRegistrar::new();
 		let resolve_result = {
 			use ethabi::{encode, Token};
-			encode(&[Token::String(String::new()), Token::FixedBytes(vec![0; 20]), Token::Address([0; 20])])
+			encode(&[Token::String(String::new()), Token::FixedBytes(vec![0; 20]), Token::Address([0; 20].into())])
 		};
 		registrar.responses.lock()[1] = Ok(resolve_result);
 
@@ -293,7 +268,7 @@ pub mod tests {
 
 
 		// when
-		let res = urlhint.resolve("test".bytes().collect()).wait().unwrap();
+		let res = urlhint.resolve("test".as_bytes().into()).wait().unwrap();
 		let calls = calls.lock();
 		let call0 = calls.get(0).expect("Registrar resolve called");
 		let call1 = calls.get(1).expect("URLHint Resolve called");
@@ -321,7 +296,7 @@ pub mod tests {
 		let urlhint = URLHintContract::new(Arc::new(registrar));
 
 		// when
-		let res = urlhint.resolve("test".bytes().collect()).wait().unwrap();
+		let res = urlhint.resolve("test".as_bytes().into()).wait().unwrap();
 
 		// then
 		assert_eq!(res, Some(URLHintResult::Dapp(GithubApp {
@@ -343,7 +318,7 @@ pub mod tests {
 		let urlhint = URLHintContract::new(Arc::new(registrar));
 
 		// when
-		let res = urlhint.resolve("test".bytes().collect()).wait().unwrap();
+		let res = urlhint.resolve("test".as_bytes().into()).wait().unwrap();
 
 		// then
 		assert_eq!(res, Some(URLHintResult::Content(Content {

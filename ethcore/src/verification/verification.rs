@@ -22,22 +22,22 @@
 //! 3. Final verification against the blockchain done before enactment.
 
 use std::collections::HashSet;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use bytes::Bytes;
-use ethereum_types::{H256, U256};
+use ethereum_types::H256;
 use hash::keccak;
 use heapsize::HeapSizeOf;
-use rlp::UntrustedRlp;
-use time::get_time;
+use rlp::Rlp;
 use triehash::ordered_trie_root;
 use unexpected::{Mismatch, OutOfBounds};
 
 use blockchain::*;
-use client::BlockChainClient;
+use client::{BlockInfo, CallContract};
 use engines::EthEngine;
 use error::{BlockError, Error};
 use header::{BlockNumber, Header};
-use transaction::SignedTransaction;
+use transaction::{SignedTransaction, UnverifiedTransaction};
 use views::BlockView;
 
 /// Preprocessed block data gathered in `verify_block_unordered` call
@@ -63,16 +63,14 @@ pub fn verify_block_basic(header: &Header, bytes: &[u8], engine: &EthEngine) -> 
 	verify_header_params(&header, engine, true)?;
 	verify_block_integrity(bytes, &header.transactions_root(), &header.uncles_hash())?;
 	engine.verify_block_basic(&header)?;
-	for u in UntrustedRlp::new(bytes).at(2)?.iter().map(|rlp| rlp.as_val::<Header>()) {
+	for u in Rlp::new(bytes).at(2)?.iter().map(|rlp| rlp.as_val::<Header>()) {
 		let u = u?;
 		verify_header_params(&u, engine, false)?;
 		engine.verify_block_basic(&u)?;
 	}
-	// Verify transactions.
-	// TODO: either use transaction views or cache the decoded transactions.
-	let v = BlockView::new(bytes);
-	for t in v.transactions() {
-		engine.verify_transaction_basic(&t, &header)?;
+
+	for t in Rlp::new(bytes).at(1)?.iter().map(|rlp| rlp.as_val::<UnverifiedTransaction>()) {
+		engine.verify_transaction_basic(&t?, &header)?;
 	}
 	Ok(())
 }
@@ -83,7 +81,7 @@ pub fn verify_block_basic(header: &Header, bytes: &[u8], engine: &EthEngine) -> 
 pub fn verify_block_unordered(header: Header, bytes: Bytes, engine: &EthEngine, check_seal: bool) -> Result<PreverifiedBlock, Error> {
 	if check_seal {
 		engine.verify_block_unordered(&header)?;
-		for u in UntrustedRlp::new(&bytes).at(2)?.iter().map(|rlp| rlp.as_val::<Header>()) {
+		for u in Rlp::new(&bytes).at(2)?.iter().map(|rlp| rlp.as_val::<Header>()) {
 			engine.verify_block_unordered(&u?)?;
 		}
 	}
@@ -93,7 +91,7 @@ pub fn verify_block_unordered(header: Header, bytes: Bytes, engine: &EthEngine, 
 		Some((engine.params().nonce_cap_increment * header.number()).into())
 	} else { None };
 	{
-		let v = BlockView::new(&bytes);
+		let v = view!(BlockView, &bytes);
 		for t in v.transactions() {
 			let t = engine.verify_transaction_unordered(t, &header)?;
 			if let Some(max_nonce) = nonce_cap {
@@ -111,31 +109,43 @@ pub fn verify_block_unordered(header: Header, bytes: Bytes, engine: &EthEngine, 
 	})
 }
 
-/// Parameters for full verification of block family: block bytes, transactions, blockchain, and state access.
-pub type FullFamilyParams<'a> = (&'a [u8], &'a [SignedTransaction], &'a BlockProvider, &'a BlockChainClient);
+/// Parameters for full verification of block family
+pub struct FullFamilyParams<'a, C: BlockInfo + CallContract + 'a> {
+	/// Serialized block bytes
+	pub block_bytes: &'a [u8],
+
+	/// Signed transactions
+	pub transactions: &'a [SignedTransaction],
+
+	/// Block provider to use during verification
+	pub block_provider: &'a BlockProvider,
+
+	/// Engine client to use during verification
+	pub client: &'a C,
+}
 
 /// Phase 3 verification. Check block information against parent and uncles.
-pub fn verify_block_family(header: &Header, parent: &Header, engine: &EthEngine, do_full: Option<FullFamilyParams>) -> Result<(), Error> {
+pub fn verify_block_family<C: BlockInfo + CallContract>(header: &Header, parent: &Header, engine: &EthEngine, do_full: Option<FullFamilyParams<C>>) -> Result<(), Error> {
 	// TODO: verify timestamp
-	verify_parent(&header, &parent, engine.params().gas_limit_bound_divisor)?;
+	verify_parent(&header, &parent, engine)?;
 	engine.verify_block_family(&header, &parent)?;
 
-	let (bytes, txs, bc, client) = match do_full {
+	let params = match do_full {
 		Some(x) => x,
 		None => return Ok(()),
 	};
 
-	verify_uncles(header, bytes, bc, engine)?;
+	verify_uncles(header, params.block_bytes, params.block_provider, engine)?;
 
-	for transaction in txs {
-		engine.machine().verify_transaction(transaction, header, client)?;
+	for transaction in params.transactions {
+		engine.machine().verify_transaction(transaction, header, params.client)?;
 	}
 
 	Ok(())
 }
 
 fn verify_uncles(header: &Header, bytes: &[u8], bc: &BlockProvider, engine: &EthEngine) -> Result<(), Error> {
-	let num_uncles = UntrustedRlp::new(bytes).at(2)?.item_count()?;
+	let num_uncles = Rlp::new(bytes).at(2)?.item_count()?;
 	let max_uncles = engine.maximum_uncle_count(header.number());
 	if num_uncles != 0 {
 		if num_uncles > max_uncles {
@@ -164,7 +174,7 @@ fn verify_uncles(header: &Header, bytes: &[u8], bc: &BlockProvider, engine: &Eth
 		}
 
 		let mut verified = HashSet::new();
-		for uncle in UntrustedRlp::new(bytes).at(2)?.iter().map(|rlp| rlp.as_val::<Header>()) {
+		for uncle in Rlp::new(bytes).at(2)?.iter().map(|rlp| rlp.as_val::<Header>()) {
 			let uncle = uncle?;
 			if excluded.contains(&uncle.hash()) {
 				return Err(From::from(BlockError::UncleInChain(uncle.hash())))
@@ -201,7 +211,7 @@ fn verify_uncles(header: &Header, bytes: &[u8], bc: &BlockProvider, engine: &Eth
 			// cB.p^7	-------------/
 			// cB.p^8
 			let mut expected_uncle_parent = header.parent_hash().clone();
-			let uncle_parent = bc.block_header(&uncle.parent_hash()).ok_or_else(|| Error::from(BlockError::UnknownUncleParent(uncle.parent_hash().clone())))?;
+			let uncle_parent = bc.block_header_data(&uncle.parent_hash()).ok_or_else(|| Error::from(BlockError::UnknownUncleParent(uncle.parent_hash().clone())))?;
 			for _ in 0..depth {
 				match bc.block_details(&expected_uncle_parent) {
 					Some(details) => {
@@ -214,7 +224,8 @@ fn verify_uncles(header: &Header, bytes: &[u8], bc: &BlockProvider, engine: &Eth
 				return Err(From::from(BlockError::UncleParentNotInChain(uncle_parent.hash())));
 			}
 
-			verify_parent(&uncle, &uncle_parent, engine.params().gas_limit_bound_divisor)?;
+			let uncle_parent = uncle_parent.decode();
+			verify_parent(&uncle, &uncle_parent, engine)?;
 			engine.verify_block_family(&uncle, &uncle_parent)?;
 			verified.insert(uncle.hash());
 		}
@@ -242,9 +253,10 @@ pub fn verify_block_final(expected: &Header, got: &Header) -> Result<(), Error> 
 
 /// Check basic header parameters.
 pub fn verify_header_params(header: &Header, engine: &EthEngine, is_full: bool) -> Result<(), Error> {
-	if header.seal().len() != engine.seal_fields() {
+	let expected_seal_fields = engine.seal_fields(header);
+	if header.seal().len() != expected_seal_fields {
 		return Err(From::from(BlockError::InvalidSealArity(
-			Mismatch { expected: engine.seal_fields(), found: header.seal().len() }
+			Mismatch { expected: expected_seal_fields, found: header.seal().len() }
 		)));
 	}
 
@@ -272,10 +284,10 @@ pub fn verify_header_params(header: &Header, engine: &EthEngine, is_full: bool) 
 	}
 
 	if is_full {
-		const ACCEPTABLE_DRIFT_SECS: u64 = 15;
-		let max_time = get_time().sec as u64 + ACCEPTABLE_DRIFT_SECS;
-		let invalid_threshold = max_time + ACCEPTABLE_DRIFT_SECS * 9;
-		let timestamp = header.timestamp();
+		const ACCEPTABLE_DRIFT: Duration = Duration::from_secs(15);
+		let max_time = SystemTime::now() + ACCEPTABLE_DRIFT;
+		let invalid_threshold = max_time + ACCEPTABLE_DRIFT * 9;
+		let timestamp = UNIX_EPOCH + Duration::from_secs(header.timestamp());
 
 		if timestamp > invalid_threshold {
 			return Err(From::from(BlockError::InvalidTimestamp(OutOfBounds { max: Some(max_time), min: None, found: timestamp })))
@@ -290,12 +302,16 @@ pub fn verify_header_params(header: &Header, engine: &EthEngine, is_full: bool) 
 }
 
 /// Check header parameters agains parent header.
-fn verify_parent(header: &Header, parent: &Header, gas_limit_divisor: U256) -> Result<(), Error> {
-	if !header.parent_hash().is_zero() && &parent.hash() != header.parent_hash() {
-		return Err(From::from(BlockError::InvalidParentHash(Mismatch { expected: parent.hash(), found: header.parent_hash().clone() })))
-	}
-	if header.timestamp() <= parent.timestamp() {
-		return Err(From::from(BlockError::InvalidTimestamp(OutOfBounds { max: None, min: Some(parent.timestamp() + 1), found: header.timestamp() })))
+fn verify_parent(header: &Header, parent: &Header, engine: &EthEngine) -> Result<(), Error> {
+	assert!(header.parent_hash().is_zero() || &parent.hash() == header.parent_hash(),
+			"Parent hash should already have been verified; qed");
+
+	let gas_limit_divisor = engine.params().gas_limit_bound_divisor;
+
+	if !engine.is_timestamp_valid(header.timestamp(), parent.timestamp()) {
+		let min = SystemTime::now() + Duration::from_secs(parent.timestamp() + 1);
+		let found = SystemTime::now() + Duration::from_secs(header.timestamp());
+		return Err(From::from(BlockError::InvalidTimestamp(OutOfBounds { max: None, min: Some(min), found })))
 	}
 	if header.number() != parent.number() + 1 {
 		return Err(From::from(BlockError::InvalidNumber(Mismatch { expected: parent.number() + 1, found: header.number() })));
@@ -317,9 +333,9 @@ fn verify_parent(header: &Header, parent: &Header, gas_limit_divisor: U256) -> R
 
 /// Verify block data against header: transactions root and uncles hash.
 fn verify_block_integrity(block: &[u8], transactions_root: &H256, uncles_hash: &H256) -> Result<(), Error> {
-	let block = UntrustedRlp::new(block);
+	let block = Rlp::new(block);
 	let tx = block.at(1)?;
-	let expected_root = &ordered_trie_root(tx.iter().map(|r| r.as_raw().to_vec())); //TODO: get rid of vectors here
+	let expected_root = &ordered_trie_root(tx.iter().map(|r| r.as_raw()));
 	if expected_root != transactions_root {
 		return Err(From::from(BlockError::InvalidTransactionsRoot(Mismatch { expected: expected_root.clone(), found: transactions_root.clone() })))
 	}
@@ -335,18 +351,21 @@ mod tests {
 	use super::*;
 
 	use std::collections::{BTreeMap, HashMap};
+	use std::time::{SystemTime, UNIX_EPOCH};
 	use ethereum_types::{H256, Bloom, U256};
-	use blockchain::extras::{BlockDetails, TransactionAddress, BlockReceipts};
+	use blockchain::{BlockDetails, TransactionAddress, BlockReceipts};
 	use encoded;
 	use hash::keccak;
 	use engines::EthEngine;
 	use error::BlockError::*;
+	use error::ErrorKind;
 	use ethkey::{Random, Generator};
 	use spec::{CommonParams, Spec};
-	use tests::helpers::{create_test_block_with_data, create_test_block};
-	use time::get_time;
+	use test_helpers::{create_test_block_with_data, create_test_block};
 	use transaction::{SignedTransaction, Transaction, UnverifiedTransaction, Action};
 	use types::log_entry::{LogEntry, LocalizedLogEntry};
+	use rlp;
+	use triehash::ordered_trie_root;
 
 	fn check_ok(result: Result<(), Error>) {
 		result.unwrap_or_else(|e| panic!("Block verification failed: {:?}", e));
@@ -354,7 +373,7 @@ mod tests {
 
 	fn check_fail(result: Result<(), Error>, e: BlockError) {
 		match result {
-			Err(Error::Block(ref error)) if *error == e => (),
+			Err(Error(ErrorKind::Block(ref error), _)) if *error == e => (),
 			Err(other) => panic!("Block verification failed.\nExpected: {:?}\nGot: {:?}", e, other),
 			Ok(_) => panic!("Block verification failed.\nExpected: {:?}\nGot: Ok", e),
 		}
@@ -363,8 +382,8 @@ mod tests {
 	fn check_fail_timestamp(result: Result<(), Error>, temp: bool) {
 		let name = if temp { "TemporarilyInvalid" } else { "InvalidTimestamp" };
 		match result {
-			Err(Error::Block(BlockError::InvalidTimestamp(_))) if !temp => (),
-			Err(Error::Block(BlockError::TemporarilyInvalid(_))) if temp => (),
+			Err(Error(ErrorKind::Block(BlockError::InvalidTimestamp(_)), _)) if !temp => (),
+			Err(Error(ErrorKind::Block(BlockError::TemporarilyInvalid(_)), _)) if temp => (),
 			Err(other) => panic!("Block verification failed.\nExpected: {}\nGot: {:?}", name, other),
 			Ok(_) => panic!("Block verification failed.\nExpected: {}\nGot: Ok", name),
 		}
@@ -390,8 +409,8 @@ mod tests {
 		}
 
 		pub fn insert(&mut self, bytes: Bytes) {
-			let number = BlockView::new(&bytes).header_view().number();
-			let hash = BlockView::new(&bytes).header_view().hash();
+			let number = view!(BlockView, &bytes).header_view().number();
+			let hash = view!(BlockView, &bytes).header_view().hash();
 			self.blocks.insert(hash.clone(), bytes);
 			self.numbers.insert(number, hash.clone());
 		}
@@ -430,7 +449,7 @@ mod tests {
 		/// Get the familial details concerning a block.
 		fn block_details(&self, hash: &H256) -> Option<BlockDetails> {
 			self.blocks.get(hash).map(|bytes| {
-				let header = BlockView::new(bytes).header();
+				let header = view!(BlockView, bytes).header();
 				BlockDetails {
 					number: header.number(),
 					total_difficulty: header.difficulty().clone(),
@@ -464,12 +483,12 @@ mod tests {
 	}
 
 	fn basic_test(bytes: &[u8], engine: &EthEngine) -> Result<(), Error> {
-		let header = BlockView::new(bytes).header();
+		let header = view!(BlockView, bytes).header();
 		verify_block_basic(&header, bytes, engine)
 	}
 
 	fn family_test<BC>(bytes: &[u8], engine: &EthEngine, bc: &BC) -> Result<(), Error> where BC: BlockProvider {
-		let view = BlockView::new(bytes);
+		let view = view!(BlockView, bytes);
 		let header = view.header();
 		let transactions: Vec<_> = view.transactions()
 			.into_iter()
@@ -482,22 +501,44 @@ mod tests {
 		// is fine.
 		let client = ::client::TestBlockChainClient::default();
 
-		let parent = bc.block_header(header.parent_hash())
-			.ok_or(BlockError::UnknownParent(header.parent_hash().clone()))?;
+		let parent = bc.block_header_data(header.parent_hash())
+			.ok_or(BlockError::UnknownParent(header.parent_hash().clone()))?
+			.decode();
 
-		let full_params: FullFamilyParams = (
-			bytes,
-			&transactions[..],
-			bc as &BlockProvider,
-			&client as &::client::BlockChainClient
-		);
+		let full_params = FullFamilyParams {
+			block_bytes: bytes,
+			transactions: &transactions[..],
+			block_provider: bc as &BlockProvider,
+			client: &client,
+		};
 		verify_block_family(&header, &parent, engine, Some(full_params))
 	}
 
 	fn unordered_test(bytes: &[u8], engine: &EthEngine) -> Result<(), Error> {
-		let header = BlockView::new(bytes).header();
+		let header = view!(BlockView, bytes).header();
 		verify_block_unordered(header, bytes.to_vec(), engine, false)?;
 		Ok(())
+	}
+
+	#[test]
+	fn test_verify_block_basic_with_invalid_transactions() {
+		let spec = Spec::new_test();
+		let engine = &*spec.engine;
+
+		let block = {
+			let mut rlp = rlp::RlpStream::new_list(3);
+			let mut header = Header::default();
+			// that's an invalid transaction list rlp
+			let invalid_transactions = vec![vec![0u8]];
+			header.set_transactions_root(ordered_trie_root(&invalid_transactions));
+			header.set_gas_limit(engine.params().min_gas_limit);
+			rlp.append(&header);
+			rlp.append_list::<Vec<u8>, _>(&invalid_transactions);
+			rlp.append_raw(&rlp::EMPTY_LIST_RLP, 1);
+			rlp.out()
+		};
+
+		assert!(basic_test(&block, engine).is_err());
 	}
 
 	#[test]
@@ -569,7 +610,7 @@ mod tests {
 		let mut uncles_rlp = RlpStream::new();
 		uncles_rlp.append_list(&good_uncles);
 		let good_uncles_hash = keccak(uncles_rlp.as_raw());
-		let good_transactions_root = ordered_trie_root(good_transactions.iter().map(|t| ::rlp::encode::<UnverifiedTransaction>(t).into_vec()));
+		let good_transactions_root = ordered_trie_root(good_transactions.iter().map(|t| ::rlp::encode::<UnverifiedTransaction>(t)));
 
 		let mut parent = good.clone();
 		parent.set_number(9);
@@ -640,19 +681,18 @@ mod tests {
 
 		header = good.clone();
 		header.set_timestamp(10);
-		check_fail(family_test(&create_test_block_with_data(&header, &good_transactions, &good_uncles), engine, &bc),
-			InvalidTimestamp(OutOfBounds { max: None, min: Some(parent.timestamp() + 1), found: header.timestamp() }));
+		check_fail_timestamp(family_test(&create_test_block_with_data(&header, &good_transactions, &good_uncles), engine, &bc), false);
 
 		header = good.clone();
 		header.set_timestamp(2450000000);
 		check_fail_timestamp(basic_test(&create_test_block_with_data(&header, &good_transactions, &good_uncles), engine), false);
 
 		header = good.clone();
-		header.set_timestamp(get_time().sec as u64 + 20);
+		header.set_timestamp(SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() + 20);
 		check_fail_timestamp(basic_test(&create_test_block_with_data(&header, &good_transactions, &good_uncles), engine), true);
 
 		header = good.clone();
-		header.set_timestamp(get_time().sec as u64 + 10);
+		header.set_timestamp(SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() + 10);
 		header.set_uncles_hash(good_uncles_hash.clone());
 		header.set_transactions_root(good_transactions_root.clone());
 		check_ok(basic_test(&create_test_block_with_data(&header, &good_transactions, &good_uncles), engine));
@@ -677,7 +717,7 @@ mod tests {
 		header.set_gas_limit(0.into());
 		header.set_difficulty("0000000000000000000000000000000000000000000000000000000000020000".parse::<U256>().unwrap());
 		match family_test(&create_test_block(&header), engine, &bc) {
-			Err(Error::Block(InvalidGasLimit(_))) => {},
+			Err(Error(ErrorKind::Block(InvalidGasLimit(_)), _)) => {},
 			Err(_) => { panic!("should be invalid difficulty fail"); },
 			_ => { panic!("Should be error, got Ok"); },
 		}

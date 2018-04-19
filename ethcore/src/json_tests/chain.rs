@@ -15,7 +15,7 @@
 // along with Parity.  If not, see <http://www.gnu.org/licenses/>.
 
 use std::sync::Arc;
-use client::{EvmTestClient, BlockChainClient, Client, ClientConfig};
+use client::{EvmTestClient, Client, ClientConfig, ChainInfo, ImportBlock};
 use block::Block;
 use spec::Genesis;
 use ethjson;
@@ -64,7 +64,7 @@ pub fn json_chain_test(json_data: &[u8]) -> Vec<String> {
 					config,
 					&spec,
 					db,
-					Arc::new(Miner::with_spec(&spec)),
+					Arc::new(Miner::new_for_tests(&spec, None)),
 					IoChannel::disconnected(),
 				).unwrap();
 				for b in &blockchain.blocks_rlp() {

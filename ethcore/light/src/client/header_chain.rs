@@ -31,21 +31,21 @@ use std::sync::Arc;
 use cht;
 
 use ethcore::block_status::BlockStatus;
-use ethcore::error::{BlockImportError, BlockError};
+use ethcore::error::{Error, ErrorKind, BlockImportError, BlockImportErrorKind, BlockError};
 use ethcore::encoded;
 use ethcore::header::Header;
 use ethcore::ids::BlockId;
-use ethcore::spec::Spec;
+use ethcore::spec::{Spec, SpecHardcodedSync};
 use ethcore::engines::epoch::{
 	Transition as EpochTransition,
 	PendingTransition as PendingEpochTransition
 };
 
-use rlp::{Encodable, Decodable, DecoderError, RlpStream, Rlp, UntrustedRlp};
+use rlp::{Encodable, Decodable, DecoderError, RlpStream, Rlp};
 use heapsize::HeapSizeOf;
 use ethereum_types::{H256, H264, U256};
 use plain_hasher::H256FastMap;
-use kvdb::{self, DBTransaction, KeyValueDB};
+use kvdb::{DBTransaction, KeyValueDB};
 
 use cache::Cache;
 use parking_lot::{Mutex, RwLock};
@@ -72,6 +72,22 @@ pub struct BlockDescriptor {
 	pub number: u64,
 	/// The block's total difficulty.
 	pub total_difficulty: U256,
+}
+
+// best block data
+#[derive(RlpEncodable, RlpDecodable)]
+struct BestAndLatest {
+	best_num: u64,
+	latest_num: u64
+}
+
+impl BestAndLatest {
+	fn new(best_num: u64, latest_num: u64) -> Self {
+		BestAndLatest {
+			best_num,
+			latest_num,
+		}
+	}
 }
 
 // candidate block description.
@@ -109,7 +125,7 @@ impl Encodable for Entry {
 }
 
 impl Decodable for Entry {
-	fn decode(rlp: &UntrustedRlp) -> Result<Self, DecoderError> {
+	fn decode(rlp: &Rlp) -> Result<Self, DecoderError> {
 		let mut candidates = SmallVec::<[Candidate; 3]>::new();
 
 		for item in rlp.iter() {
@@ -170,7 +186,7 @@ fn encode_canonical_transition(header: &Header, proof: &[u8]) -> Vec<u8> {
 
 // decode last canonical transition entry.
 fn decode_canonical_transition(t: &[u8]) -> Result<(Header, &[u8]), DecoderError> {
-	let rlp = UntrustedRlp::new(t);
+	let rlp = Rlp::new(t);
 
 	Ok((rlp.val_at(0)?, rlp.at(1)?.data()?))
 }
@@ -178,6 +194,12 @@ fn decode_canonical_transition(t: &[u8]) -> Result<(Header, &[u8]), DecoderError
 /// Pending changes from `insert` to be applied after the database write has finished.
 pub struct PendingChanges {
 	best_block: Option<BlockDescriptor>, // new best block.
+}
+
+/// Whether or not the hardcoded sync feature is allowed.
+pub enum HardcodedSync {
+	Allow,
+	Deny,
 }
 
 /// Header chain. See module docs for more details.
@@ -198,19 +220,17 @@ impl HeaderChain {
 		col: Option<u32>,
 		spec: &Spec,
 		cache: Arc<Mutex<Cache>>,
-	) -> Result<Self, kvdb::Error> {
+		allow_hs: HardcodedSync,
+	) -> Result<Self, Error> {
 		let mut live_epoch_proofs = ::std::collections::HashMap::default();
 
 		let genesis = ::rlp::encode(&spec.genesis_header()).into_vec();
 		let decoded_header = spec.genesis_header();
 
 		let chain = if let Some(current) = db.get(col, CURRENT_KEY)? {
-			let (best_number, highest_number) = {
-				let rlp = Rlp::new(&current);
-				(rlp.val_at(0), rlp.val_at(1))
-			};
+			let curr : BestAndLatest = ::rlp::decode(&current);
 
-			let mut cur_number = highest_number;
+			let mut cur_number = curr.latest_num;
 			let mut candidates = BTreeMap::new();
 
 			// load all era entries, referenced headers within them,
@@ -238,15 +258,15 @@ impl HeaderChain {
 
 			// fill best block block descriptor.
 			let best_block = {
-				let era = match candidates.get(&best_number) {
+				let era = match candidates.get(&curr.best_num) {
 					Some(era) => era,
-					None => return Err("Database corrupt: highest block referenced but no data.".into()),
+					None => bail!(ErrorKind::Database("Database corrupt: highest block referenced but no data.".into())),
 				};
 
 				let best = &era.candidates[0];
 				BlockDescriptor {
 					hash: best.hash,
-					number: best_number,
+					number: curr.best_num,
 					total_difficulty: best.total_difficulty,
 				}
 			};
@@ -260,8 +280,9 @@ impl HeaderChain {
 				col: col,
 				cache: cache,
 			}
+
 		} else {
-			HeaderChain {
+			let chain = HeaderChain {
 				genesis_header: encoded::Header::new(genesis),
 				best_block: RwLock::new(BlockDescriptor {
 					hash: decoded_header.hash(),
@@ -270,10 +291,43 @@ impl HeaderChain {
 				}),
 				candidates: RwLock::new(BTreeMap::new()),
 				live_epoch_proofs: RwLock::new(live_epoch_proofs),
-				db: db,
+				db: db.clone(),
 				col: col,
 				cache: cache,
+			};
+
+			// insert the hardcoded sync into the database.
+			if let (&Some(ref hardcoded_sync), HardcodedSync::Allow) = (&spec.hardcoded_sync, allow_hs) {
+				let mut batch = db.transaction();
+
+				// insert the hardcoded CHT roots into the database.
+				for (cht_num, cht_root) in hardcoded_sync.chts.iter().enumerate() {
+					batch.put(col, cht_key(cht_num as u64).as_bytes(), &::rlp::encode(cht_root));
+				}
+
+				let decoded_header = hardcoded_sync.header.decode();
+				let decoded_header_num = decoded_header.number();
+
+				// write the block in the DB.
+				info!(target: "chain", "Inserting hardcoded block #{} in chain",
+					  decoded_header_num);
+				let pending = chain.insert_with_td(&mut batch, decoded_header,
+												hardcoded_sync.total_difficulty, None)?;
+
+				// check that we have enough hardcoded CHT roots. avoids panicking later.
+				let cht_num = cht::block_to_cht_number(decoded_header_num - 1)
+					.expect("specs provided a hardcoded block with height 0");
+				if cht_num >= hardcoded_sync.chts.len() as u64 {
+					warn!(target: "chain", "specs didn't provide enough CHT roots for its \
+											hardcoded block ; falling back to non-hardcoded sync \
+											mode");
+				} else {
+					db.write_buffered(batch);
+					chain.apply_pending(pending);
+				}
 			}
+
+			chain
 		};
 
 		// instantiate genesis epoch data if it doesn't exist.
@@ -305,6 +359,29 @@ impl HeaderChain {
 		header: Header,
 		transition_proof: Option<Vec<u8>>,
 	) -> Result<PendingChanges, BlockImportError> {
+		self.insert_inner(transaction, header, None, transition_proof)
+	}
+
+	/// Insert a pre-verified header, with a known total difficulty. Similary to `insert`.
+	///
+	/// This blindly trusts that the data given to it is sensible.
+	pub fn insert_with_td(
+		&self,
+		transaction: &mut DBTransaction,
+		header: Header,
+		total_difficulty: U256,
+		transition_proof: Option<Vec<u8>>,
+	) -> Result<PendingChanges, BlockImportError> {
+		self.insert_inner(transaction, header, Some(total_difficulty), transition_proof)
+	}
+
+	fn insert_inner(
+		&self,
+		transaction: &mut DBTransaction,
+		header: Header,
+		total_difficulty: Option<U256>,
+		transition_proof: Option<Vec<u8>>,
+	) -> Result<PendingChanges, BlockImportError> {
 		let hash = header.hash();
 		let number = header.number();
 		let parent_hash = *header.parent_hash();
@@ -321,19 +398,24 @@ impl HeaderChain {
 		// hold candidates the whole time to guard import order.
 		let mut candidates = self.candidates.write();
 
-		// find parent details.
-		let parent_td =
-			if number == 1 {
-				self.genesis_header.difficulty()
-			} else {
-				candidates.get(&(number - 1))
-					.and_then(|entry| entry.candidates.iter().find(|c| c.hash == parent_hash))
-					.map(|c| c.total_difficulty)
-					.ok_or_else(|| BlockError::UnknownParent(parent_hash))
-					.map_err(BlockImportError::Block)?
-			};
+		// find total difficulty.
+		let total_difficulty = match total_difficulty {
+			Some(td) => td,
+			None => {
+				let parent_td =
+					if number == 1 {
+						self.genesis_header.difficulty()
+					} else {
+						candidates.get(&(number - 1))
+							.and_then(|entry| entry.candidates.iter().find(|c| c.hash == parent_hash))
+							.map(|c| c.total_difficulty)
+							.ok_or_else(|| BlockError::UnknownParent(parent_hash))
+							.map_err(BlockImportErrorKind::Block)?
+					};
 
-		let total_difficulty = parent_td + *header.difficulty();
+				parent_td + *header.difficulty()
+			},
+		};
 
 		// insert headers and candidates entries and write era to disk.
 		{
@@ -472,11 +554,69 @@ impl HeaderChain {
 		// write the best and latest eras to the database.
 		{
 			let latest_num = *candidates.iter().rev().next().expect("at least one era just inserted; qed").0;
-			let mut stream = RlpStream::new_list(2);
-			stream.append(&best_num).append(&latest_num);
-			transaction.put(self.col, CURRENT_KEY, &stream.out())
+			let curr = BestAndLatest::new(best_num, latest_num);
+			transaction.put(self.col, CURRENT_KEY, &::rlp::encode(&curr))
 		}
 		Ok(pending)
+	}
+
+	/// Generates the specifications for hardcoded sync. This is typically only called manually
+	/// from time to time by a Parity developer in order to update the chain specifications.
+	///
+	/// Returns `None` if we are at the genesis block, or if an error happens .
+	pub fn read_hardcoded_sync(&self) -> Result<Option<SpecHardcodedSync>, Error> {
+		let mut chts = Vec::new();
+		let mut cht_num = 0;
+
+		loop {
+			let cht = match self.cht_root(cht_num) {
+				Some(cht) => cht,
+				None if cht_num != 0 => {
+					// end of the iteration
+					let h_num = 1 + cht_num as u64 * cht::SIZE;
+					let header = if let Some(header) = self.block_header(BlockId::Number(h_num)) {
+						header
+					} else {
+						let msg = format!("header of block #{} not found in DB ; database in an \
+											inconsistent state", h_num);
+						bail!(ErrorKind::Database(msg.into()));
+					};
+
+					let decoded = header.decode();
+
+					let entry: Entry = {
+						let bytes = self.db.get(self.col, era_key(h_num).as_bytes())?
+							.ok_or_else(|| {
+								let msg = format!("entry for era #{} not found in DB ; database \
+													in an inconsistent state", h_num);
+								ErrorKind::Database(msg.into())
+							})?;
+						::rlp::decode(&bytes)
+					};
+
+					let total_difficulty = entry.candidates.iter()
+						.find(|c| c.hash == decoded.hash())
+						.ok_or_else(|| {
+							let msg = "no candidate matching block found in DB ; database in an \
+										inconsistent state";
+							ErrorKind::Database(msg.into())
+						})?
+						.total_difficulty;
+
+					break Ok(Some(SpecHardcodedSync {
+						header: header,
+						total_difficulty: total_difficulty,
+						chts: chts,
+					}));
+				},
+				None => {
+					break Ok(None);
+				},
+			};
+
+			chts.push(cht);
+			cht_num += 1;
+		}
 	}
 
 	/// Apply pending changes from a previous `insert` operation.
@@ -497,7 +637,7 @@ impl HeaderChain {
 				if self.best_block.read().number < num { return None }
 				self.candidates.read().get(&num).map(|entry| entry.canonical_hash)
 			}
-			BlockId::Latest | BlockId::Pending => {
+			BlockId::Latest => {
 				Some(self.best_block.read().hash)
 			}
 		}
@@ -539,7 +679,7 @@ impl HeaderChain {
 				self.candidates.read().get(&num).map(|entry| entry.canonical_hash)
 					.and_then(load_from_db)
 			}
-			BlockId::Latest | BlockId::Pending => {
+			BlockId::Latest => {
 				// hold candidates hear to prevent deletion of the header
 				// as we read it.
 				let _candidates = self.candidates.read();
@@ -575,7 +715,7 @@ impl HeaderChain {
 				if self.best_block.read().number < num { return None }
 				candidates.get(&num).map(|era| era.candidates[0].total_difficulty)
 			}
-			BlockId::Latest | BlockId::Pending => Some(self.best_block.read().total_difficulty)
+			BlockId::Latest => Some(self.best_block.read().total_difficulty)
 		}
 	}
 
@@ -721,9 +861,10 @@ impl<'a> Iterator for AncestryIter<'a> {
 
 #[cfg(test)]
 mod tests {
-	use super::HeaderChain;
+	use super::{HeaderChain, HardcodedSync};
 	use std::sync::Arc;
 
+	use ethereum_types::U256;
 	use ethcore::ids::BlockId;
 	use ethcore::header::Header;
 	use ethcore::spec::Spec;
@@ -731,7 +872,7 @@ mod tests {
 	use kvdb::KeyValueDB;
 	use kvdb_memorydb;
 
-	use time::Duration;
+	use std::time::Duration;
 	use parking_lot::Mutex;
 
 	fn make_db() -> Arc<KeyValueDB> {
@@ -744,9 +885,9 @@ mod tests {
 		let genesis_header = spec.genesis_header();
 		let db = make_db();
 
-		let cache = Arc::new(Mutex::new(Cache::new(Default::default(), Duration::hours(6))));
+		let cache = Arc::new(Mutex::new(Cache::new(Default::default(), Duration::from_secs(6 * 3600))));
 
-		let chain = HeaderChain::new(db.clone(), None, &spec, cache).unwrap();
+		let chain = HeaderChain::new(db.clone(), None, &spec, cache, HardcodedSync::Allow).unwrap();
 
 		let mut parent_hash = genesis_header.hash();
 		let mut rolling_timestamp = genesis_header.timestamp();
@@ -755,7 +896,7 @@ mod tests {
 			header.set_parent_hash(parent_hash);
 			header.set_number(i);
 			header.set_timestamp(rolling_timestamp);
-			header.set_difficulty(*genesis_header.difficulty() * i.into());
+			header.set_difficulty(*genesis_header.difficulty() * i as u32);
 			parent_hash = header.hash();
 
 			let mut tx = db.transaction();
@@ -777,9 +918,9 @@ mod tests {
 		let spec = Spec::new_test();
 		let genesis_header = spec.genesis_header();
 		let db = make_db();
-		let cache = Arc::new(Mutex::new(Cache::new(Default::default(), Duration::hours(6))));
+		let cache = Arc::new(Mutex::new(Cache::new(Default::default(), Duration::from_secs(6 * 3600))));
 
-		let chain = HeaderChain::new(db.clone(), None, &spec, cache).unwrap();
+		let chain = HeaderChain::new(db.clone(), None, &spec, cache, HardcodedSync::Allow).unwrap();
 
 		let mut parent_hash = genesis_header.hash();
 		let mut rolling_timestamp = genesis_header.timestamp();
@@ -788,7 +929,7 @@ mod tests {
 			header.set_parent_hash(parent_hash);
 			header.set_number(i);
 			header.set_timestamp(rolling_timestamp);
-			header.set_difficulty(*genesis_header.difficulty() * i.into());
+			header.set_difficulty(*genesis_header.difficulty() * i as u32);
 			parent_hash = header.hash();
 
 			let mut tx = db.transaction();
@@ -807,7 +948,7 @@ mod tests {
 				header.set_parent_hash(parent_hash);
 				header.set_number(i);
 				header.set_timestamp(rolling_timestamp);
-				header.set_difficulty(*genesis_header.difficulty() * i.into());
+				header.set_difficulty(*genesis_header.difficulty() * i as u32);
 				parent_hash = header.hash();
 
 				let mut tx = db.transaction();
@@ -831,7 +972,7 @@ mod tests {
 				header.set_parent_hash(parent_hash);
 				header.set_number(i);
 				header.set_timestamp(rolling_timestamp);
-				header.set_difficulty(*genesis_header.difficulty() * (i * i).into());
+				header.set_difficulty(*genesis_header.difficulty() * U256::from(i * i));
 				parent_hash = header.hash();
 
 				let mut tx = db.transaction();
@@ -859,13 +1000,12 @@ mod tests {
 	fn earliest_is_latest() {
 		let spec = Spec::new_test();
 		let db = make_db();
-		let cache = Arc::new(Mutex::new(Cache::new(Default::default(), Duration::hours(6))));
+		let cache = Arc::new(Mutex::new(Cache::new(Default::default(), Duration::from_secs(6 * 3600))));
 
-		let chain = HeaderChain::new(db.clone(), None, &spec, cache).unwrap();
+		let chain = HeaderChain::new(db.clone(), None, &spec, cache, HardcodedSync::Allow).unwrap();
 
 		assert!(chain.block_header(BlockId::Earliest).is_some());
 		assert!(chain.block_header(BlockId::Latest).is_some());
-		assert!(chain.block_header(BlockId::Pending).is_some());
 	}
 
 	#[test]
@@ -873,10 +1013,11 @@ mod tests {
 		let spec = Spec::new_test();
 		let genesis_header = spec.genesis_header();
 		let db = make_db();
-		let cache = Arc::new(Mutex::new(Cache::new(Default::default(), Duration::hours(6))));
+		let cache = Arc::new(Mutex::new(Cache::new(Default::default(), Duration::from_secs(6 * 3600))));
 
 		{
-			let chain = HeaderChain::new(db.clone(), None, &spec, cache.clone()).unwrap();
+			let chain = HeaderChain::new(db.clone(), None, &spec, cache.clone(),
+										HardcodedSync::Allow).unwrap();
 			let mut parent_hash = genesis_header.hash();
 			let mut rolling_timestamp = genesis_header.timestamp();
 			for i in 1..10000 {
@@ -884,7 +1025,7 @@ mod tests {
 				header.set_parent_hash(parent_hash);
 				header.set_number(i);
 				header.set_timestamp(rolling_timestamp);
-				header.set_difficulty(*genesis_header.difficulty() * i.into());
+				header.set_difficulty(*genesis_header.difficulty() * i as u32);
 				parent_hash = header.hash();
 
 				let mut tx = db.transaction();
@@ -896,7 +1037,8 @@ mod tests {
 			}
 		}
 
-		let chain = HeaderChain::new(db.clone(), None, &spec, cache.clone()).unwrap();
+		let chain = HeaderChain::new(db.clone(), None, &spec, cache.clone(),
+									HardcodedSync::Allow).unwrap();
 		assert!(chain.block_header(BlockId::Number(10)).is_none());
 		assert!(chain.block_header(BlockId::Number(9000)).is_some());
 		assert!(chain.cht_root(2).is_some());
@@ -909,10 +1051,11 @@ mod tests {
 		let spec = Spec::new_test();
 		let genesis_header = spec.genesis_header();
 		let db = make_db();
-		let cache = Arc::new(Mutex::new(Cache::new(Default::default(), Duration::hours(6))));
+		let cache = Arc::new(Mutex::new(Cache::new(Default::default(), Duration::from_secs(6 * 3600))));
 
 		{
-			let chain = HeaderChain::new(db.clone(), None, &spec, cache.clone()).unwrap();
+			let chain = HeaderChain::new(db.clone(), None, &spec, cache.clone(),
+										HardcodedSync::Allow).unwrap();
 			let mut parent_hash = genesis_header.hash();
 			let mut rolling_timestamp = genesis_header.timestamp();
 
@@ -922,7 +1065,7 @@ mod tests {
 				header.set_parent_hash(parent_hash);
 				header.set_number(i);
 				header.set_timestamp(rolling_timestamp);
-				header.set_difficulty(*genesis_header.difficulty() * i.into());
+				header.set_difficulty(*genesis_header.difficulty() * i as u32);
 				parent_hash = header.hash();
 
 				let mut tx = db.transaction();
@@ -939,7 +1082,7 @@ mod tests {
 				header.set_parent_hash(parent_hash);
 				header.set_number(i);
 				header.set_timestamp(rolling_timestamp);
-				header.set_difficulty(*genesis_header.difficulty() * i.into() * 1000.into());
+				header.set_difficulty(*genesis_header.difficulty() * U256::from(i as u32 * 1000u32));
 				parent_hash = header.hash();
 
 				let mut tx = db.transaction();
@@ -954,7 +1097,8 @@ mod tests {
 		}
 
 		// after restoration, non-canonical eras should still be loaded.
-		let chain = HeaderChain::new(db.clone(), None, &spec, cache.clone()).unwrap();
+		let chain = HeaderChain::new(db.clone(), None, &spec, cache.clone(),
+									HardcodedSync::Allow).unwrap();
 		assert_eq!(chain.block_header(BlockId::Latest).unwrap().number(), 10);
 		assert!(chain.candidates.read().get(&100).is_some())
 	}
@@ -964,9 +1108,10 @@ mod tests {
 		let spec = Spec::new_test();
 		let genesis_header = spec.genesis_header();
 		let db = make_db();
-		let cache = Arc::new(Mutex::new(Cache::new(Default::default(), Duration::hours(6))));
+		let cache = Arc::new(Mutex::new(Cache::new(Default::default(), Duration::from_secs(6 * 3600))));
 
-		let chain = HeaderChain::new(db.clone(), None, &spec, cache.clone()).unwrap();
+		let chain = HeaderChain::new(db.clone(), None, &spec, cache.clone(),
+									HardcodedSync::Allow).unwrap();
 
 		assert!(chain.block_header(BlockId::Earliest).is_some());
 		assert!(chain.block_header(BlockId::Number(0)).is_some());
@@ -978,9 +1123,9 @@ mod tests {
 		let spec = Spec::new_test();
 		let genesis_header = spec.genesis_header();
 		let db = make_db();
-		let cache = Arc::new(Mutex::new(Cache::new(Default::default(), Duration::hours(6))));
+		let cache = Arc::new(Mutex::new(Cache::new(Default::default(), Duration::from_secs(6 * 3600))));
 
-		let chain = HeaderChain::new(db.clone(), None, &spec, cache).unwrap();
+		let chain = HeaderChain::new(db.clone(), None, &spec, cache, HardcodedSync::Allow).unwrap();
 
 		let mut parent_hash = genesis_header.hash();
 		let mut rolling_timestamp = genesis_header.timestamp();
@@ -989,7 +1134,7 @@ mod tests {
 			header.set_parent_hash(parent_hash);
 			header.set_number(i);
 			header.set_timestamp(rolling_timestamp);
-			header.set_difficulty(*genesis_header.difficulty() * i.into());
+			header.set_difficulty(*genesis_header.difficulty() * i as u32);
 			parent_hash = header.hash();
 
 			let mut tx = db.transaction();
@@ -1023,7 +1168,7 @@ mod tests {
 			header.set_parent_hash(parent_hash);
 			header.set_number(i);
 			header.set_timestamp(rolling_timestamp);
-			header.set_difficulty(*genesis_header.difficulty() * i.into());
+			header.set_difficulty(*genesis_header.difficulty() * i as u32);
 			parent_hash = header.hash();
 
 			let mut tx = db.transaction();
@@ -1037,5 +1182,46 @@ mod tests {
 		// no live blocks have associated epoch proofs -- make sure we aren't leaking memory.
 		assert!(chain.live_epoch_proofs.read().is_empty());
 		assert_eq!(chain.epoch_transition_for(parent_hash).unwrap().1, vec![1, 2, 3, 4]);
+	}
+
+	#[test]
+	fn hardcoded_sync_gen() {
+		let spec = Spec::new_test();
+		let genesis_header = spec.genesis_header();
+		let db = make_db();
+
+		let cache = Arc::new(Mutex::new(Cache::new(Default::default(), Duration::from_secs(6 * 3600))));
+
+		let chain = HeaderChain::new(db.clone(), None, &spec, cache, HardcodedSync::Allow).unwrap();
+
+		let mut parent_hash = genesis_header.hash();
+		let mut rolling_timestamp = genesis_header.timestamp();
+		let mut total_difficulty = *genesis_header.difficulty();
+		let h_num = 3 * ::cht::SIZE + 1;
+		for i in 1..10000 {
+			let mut header = Header::new();
+			header.set_parent_hash(parent_hash);
+			header.set_number(i);
+			header.set_timestamp(rolling_timestamp);
+			let diff = *genesis_header.difficulty() * i as u32;
+			header.set_difficulty(diff);
+			if i <= h_num {
+				total_difficulty = total_difficulty + diff;
+			}
+			parent_hash = header.hash();
+
+			let mut tx = db.transaction();
+			let pending = chain.insert(&mut tx, header, None).unwrap();
+			db.write(tx).unwrap();
+			chain.apply_pending(pending);
+
+			rolling_timestamp += 10;
+		}
+
+		let hardcoded_sync = chain.read_hardcoded_sync().unwrap().unwrap();
+		assert_eq!(hardcoded_sync.chts.len(), 3);
+		assert_eq!(hardcoded_sync.total_difficulty, total_difficulty);
+		let decoded: Header = hardcoded_sync.header.decode();
+		assert_eq!(decoded.number(), h_num);
 	}
 }

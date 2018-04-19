@@ -14,36 +14,38 @@
 // You should have received a copy of the GNU General Public License
 // along with Parity.  If not, see <http://www.gnu.org/licenses/>.
 
-use std::time;
+use std::time::{Duration, Instant};
 use std::sync::{Arc, Weak};
 use std::sync::atomic::AtomicBool;
 use std::collections::{VecDeque, BTreeMap, BTreeSet};
 use parking_lot::{Mutex, RwLock, Condvar};
 use ethereum_types::H256;
-use ethkey::{Secret, Signature};
-use key_server_cluster::{Error, NodeId, SessionId};
+use ethkey::Secret;
+use key_server_cluster::{Error, NodeId, SessionId, Requester};
 use key_server_cluster::cluster::{Cluster, ClusterData, ClusterConfiguration, ClusterView};
 use key_server_cluster::connection_trigger::ServersSetChangeSessionCreatorConnector;
 use key_server_cluster::message::{self, Message};
 use key_server_cluster::generation_session::{SessionImpl as GenerationSessionImpl};
 use key_server_cluster::decryption_session::{SessionImpl as DecryptionSessionImpl};
 use key_server_cluster::encryption_session::{SessionImpl as EncryptionSessionImpl};
-use key_server_cluster::signing_session::{SessionImpl as SigningSessionImpl};
+use key_server_cluster::signing_session_ecdsa::{SessionImpl as EcdsaSigningSessionImpl};
+use key_server_cluster::signing_session_schnorr::{SessionImpl as SchnorrSigningSessionImpl};
 use key_server_cluster::share_add_session::{SessionImpl as ShareAddSessionImpl, IsolatedSessionTransport as ShareAddTransport};
 use key_server_cluster::servers_set_change_session::{SessionImpl as ServersSetChangeSessionImpl};
 use key_server_cluster::key_version_negotiation_session::{SessionImpl as KeyVersionNegotiationSessionImpl,
 	IsolatedSessionTransport as VersionNegotiationTransport};
 
-use key_server_cluster::cluster_sessions_creator::{GenerationSessionCreator, EncryptionSessionCreator, DecryptionSessionCreator, SigningSessionCreator,
-	KeyVersionNegotiationSessionCreator, AdminSessionCreator, SessionCreatorCore, ClusterSessionCreator};
+use key_server_cluster::cluster_sessions_creator::{GenerationSessionCreator, EncryptionSessionCreator, DecryptionSessionCreator,
+	SchnorrSigningSessionCreator, KeyVersionNegotiationSessionCreator, AdminSessionCreator, SessionCreatorCore,
+	EcdsaSigningSessionCreator, ClusterSessionCreator};
 
 /// When there are no session-related messages for SESSION_TIMEOUT_INTERVAL seconds,
 /// we must treat this session as stalled && finish it with an error.
 /// This timeout is for cases when node is responding to KeepAlive messages, but intentionally ignores
 /// session messages.
-const SESSION_TIMEOUT_INTERVAL: u64 = 60;
+const SESSION_TIMEOUT_INTERVAL: Duration = Duration::from_secs(60);
 /// Interval to send session-level KeepAlive-messages.
-const SESSION_KEEP_ALIVE_INTERVAL: u64 = 30;
+const SESSION_KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(30);
 
 lazy_static! {
 	/// Servers set change session id (there could be at most 1 session => hardcoded id).
@@ -82,10 +84,10 @@ pub trait ClusterSession {
 	fn on_message(&self, sender: &NodeId, message: &Message) -> Result<(), Error>;
 
 	/// 'Wait for session completion' helper.
-	fn wait_session<T, U, F: Fn(&U) -> Option<Result<T, Error>>>(completion_event: &Condvar, session_data: &Mutex<U>, timeout: Option<time::Duration>, result_reader: F) -> Result<T, Error> {
+	fn wait_session<T, U, F: Fn(&U) -> Option<Result<T, Error>>>(completion_event: &Condvar, session_data: &Mutex<U>, timeout: Option<Duration>, result_reader: F) -> Option<Result<T, Error>> {
 		let mut locked_data = session_data.lock();
 		match result_reader(&locked_data) {
-			Some(result) => result,
+			Some(result) => Some(result),
 			None => {
 				match timeout {
 					None => completion_event.wait(&mut locked_data),
@@ -95,7 +97,6 @@ pub trait ClusterSession {
 				}
 
 				result_reader(&locked_data)
-					.expect("waited for completion; completion is only signaled when result.is_some(); qed")
 			},
 		}
 	}
@@ -124,9 +125,11 @@ pub struct ClusterSessions {
 	/// Encryption sessions.
 	pub encryption_sessions: ClusterSessionsContainer<EncryptionSessionImpl, EncryptionSessionCreator, ()>,
 	/// Decryption sessions.
-	pub decryption_sessions: ClusterSessionsContainer<DecryptionSessionImpl, DecryptionSessionCreator, Signature>,
-	/// Signing sessions.
-	pub signing_sessions: ClusterSessionsContainer<SigningSessionImpl, SigningSessionCreator, Signature>,
+	pub decryption_sessions: ClusterSessionsContainer<DecryptionSessionImpl, DecryptionSessionCreator, Requester>,
+	/// Schnorr signing sessions.
+	pub schnorr_signing_sessions: ClusterSessionsContainer<SchnorrSigningSessionImpl, SchnorrSigningSessionCreator, Requester>,
+	/// ECDSA signing sessions.
+	pub ecdsa_signing_sessions: ClusterSessionsContainer<EcdsaSigningSessionImpl, EcdsaSigningSessionCreator, Requester>,
 	/// Key version negotiation sessions.
 	pub negotiation_sessions: ClusterSessionsContainer<KeyVersionNegotiationSessionImpl<VersionNegotiationTransport>, KeyVersionNegotiationSessionCreator, ()>,
 	/// Administrative sessions.
@@ -166,9 +169,9 @@ pub struct QueuedSession<S> {
 	/// Cluster view.
 	pub cluster_view: Arc<Cluster>,
 	/// Last keep alive time.
-	pub last_keep_alive_time: time::Instant,
+	pub last_keep_alive_time: Instant,
 	/// Last received message time.
-	pub last_message_time: time::Instant,
+	pub last_message_time: Instant,
 	/// Generation session.
 	pub session: Arc<S>,
 	/// Messages queue.
@@ -203,7 +206,10 @@ impl ClusterSessions {
 			decryption_sessions: ClusterSessionsContainer::new(DecryptionSessionCreator {
 				core: creator_core.clone(),
 			}, container_state.clone()),
-			signing_sessions: ClusterSessionsContainer::new(SigningSessionCreator {
+			schnorr_signing_sessions: ClusterSessionsContainer::new(SchnorrSigningSessionCreator {
+				core: creator_core.clone(),
+			}, container_state.clone()),
+			ecdsa_signing_sessions: ClusterSessionsContainer::new(EcdsaSigningSessionCreator {
 				core: creator_core.clone(),
 			}, container_state.clone()),
 			negotiation_sessions: ClusterSessionsContainer::new(KeyVersionNegotiationSessionCreator {
@@ -240,7 +246,8 @@ impl ClusterSessions {
 		self.generation_sessions.stop_stalled_sessions();
 		self.encryption_sessions.stop_stalled_sessions();
 		self.decryption_sessions.stop_stalled_sessions();
-		self.signing_sessions.stop_stalled_sessions();
+		self.schnorr_signing_sessions.stop_stalled_sessions();
+		self.ecdsa_signing_sessions.stop_stalled_sessions();
 		self.negotiation_sessions.stop_stalled_sessions();
 		self.admin_sessions.stop_stalled_sessions();
 	}
@@ -250,7 +257,8 @@ impl ClusterSessions {
 		self.generation_sessions.on_connection_timeout(node_id);
 		self.encryption_sessions.on_connection_timeout(node_id);
 		self.decryption_sessions.on_connection_timeout(node_id);
-		self.signing_sessions.on_connection_timeout(node_id);
+		self.schnorr_signing_sessions.on_connection_timeout(node_id);
+		self.ecdsa_signing_sessions.on_connection_timeout(node_id);
 		self.negotiation_sessions.on_connection_timeout(node_id);
 		self.admin_sessions.on_connection_timeout(node_id);
 		self.creator_core.on_connection_timeout(node_id);
@@ -282,7 +290,7 @@ impl<S, SC, D> ClusterSessionsContainer<S, SC, D> where S: ClusterSession, SC: C
 		sessions.get_mut(session_id)
 			.map(|s| {
 				if update_last_message_time {
-					s.last_message_time = time::Instant::now();
+					s.last_message_time = Instant::now();
 				}
 				s.session.clone()
 			})
@@ -310,8 +318,8 @@ impl<S, SC, D> ClusterSessionsContainer<S, SC, D> where S: ClusterSession, SC: C
 		let queued_session = QueuedSession {
 			master: master,
 			cluster_view: cluster,
-			last_keep_alive_time: time::Instant::now(),
-			last_message_time: time::Instant::now(),
+			last_keep_alive_time: Instant::now(),
+			last_message_time: Instant::now(),
 			session: session.clone(),
 			queue: VecDeque::new(),
 		};
@@ -344,7 +352,7 @@ impl<S, SC, D> ClusterSessionsContainer<S, SC, D> where S: ClusterSession, SC: C
 		for sid in sessions.keys().cloned().collect::<Vec<_>>() {
 			let remove_session = {
 				let session = sessions.get(&sid).expect("enumerating only existing sessions; qed");
-				if time::Instant::now() - session.last_message_time > time::Duration::from_secs(SESSION_TIMEOUT_INTERVAL) {
+				if Instant::now() - session.last_message_time > SESSION_TIMEOUT_INTERVAL {
 					session.session.on_session_timeout();
 					session.session.is_finished()
 				} else {
@@ -392,8 +400,8 @@ impl<S, SC, D> ClusterSessionsContainer<S, SC, D> where S: ClusterSession, SC: C
 impl<S, SC, D> ClusterSessionsContainer<S, SC, D> where S: ClusterSession, SC: ClusterSessionCreator<S, D>, SessionId: From<S::Id> {
 	pub fn send_keep_alive(&self, session_id: &S::Id, self_node_id: &NodeId) {
 		if let Some(session) = self.sessions.write().get_mut(session_id) {
-			let now = time::Instant::now();
-			if self_node_id == &session.master && now - session.last_keep_alive_time > time::Duration::from_secs(SESSION_KEEP_ALIVE_INTERVAL) {
+			let now = Instant::now();
+			if self_node_id == &session.master && now - session.last_keep_alive_time > SESSION_KEEP_ALIVE_INTERVAL {
 				session.last_keep_alive_time = now;
 				// since we send KeepAlive message to prevent nodes from disconnecting
 				// && worst thing that can happen if node is disconnected is that session is failed
@@ -407,7 +415,7 @@ impl<S, SC, D> ClusterSessionsContainer<S, SC, D> where S: ClusterSession, SC: C
 
 	pub fn on_keep_alive(&self, session_id: &S::Id, sender: &NodeId) {
 		if let Some(session) = self.sessions.write().get_mut(session_id) {
-			let now = time::Instant::now();
+			let now = Instant::now();
 			// we only accept keep alive from master node of ServersSetChange session
 			if sender == &session.master {
 				session.last_keep_alive_time = now;
@@ -554,12 +562,14 @@ pub fn create_cluster_view(data: &Arc<ClusterData>, requires_all_connections: bo
 #[cfg(test)]
 mod tests {
 	use std::sync::Arc;
+	use std::sync::atomic::{AtomicUsize, Ordering};
 	use ethkey::{Random, Generator};
 	use key_server_cluster::{Error, DummyAclStorage, DummyKeyStorage, MapKeyServerSet, PlainNodeKeyPair};
 	use key_server_cluster::cluster::ClusterConfiguration;
 	use key_server_cluster::connection_trigger::SimpleServersSetChangeSessionCreatorConnector;
 	use key_server_cluster::cluster::tests::DummyCluster;
-	use super::{ClusterSessions, AdminSessionCreationData};
+	use key_server_cluster::generation_session::{SessionImpl as GenerationSession};
+	use super::{ClusterSessions, AdminSessionCreationData, ClusterSessionsListener};
 
 	pub fn make_cluster_sessions() -> ClusterSessions {
 		let key_pair = Random.generate().unwrap();
@@ -600,5 +610,36 @@ mod tests {
 			Err(e) => unreachable!(format!("{}", e)),
 			Ok(_) => unreachable!("OK"),
 		}
+	}
+
+	#[test]
+	fn session_listener_works() {
+		#[derive(Default)]
+		struct GenerationSessionListener {
+			inserted: AtomicUsize,
+			removed: AtomicUsize,
+		}
+
+		impl ClusterSessionsListener<GenerationSession> for GenerationSessionListener {
+			fn on_session_inserted(&self, _session: Arc<GenerationSession>) {
+				self.inserted.fetch_add(1, Ordering::Relaxed);
+			}
+
+			fn on_session_removed(&self, _session: Arc<GenerationSession>) {
+				self.removed.fetch_add(1, Ordering::Relaxed);
+			}
+		}
+
+		let listener = Arc::new(GenerationSessionListener::default());
+		let sessions = make_cluster_sessions();
+		sessions.generation_sessions.add_listener(listener.clone());
+
+		sessions.generation_sessions.insert(Arc::new(DummyCluster::new(Default::default())), Default::default(), Default::default(), None, false, None).unwrap();
+		assert_eq!(listener.inserted.load(Ordering::Relaxed), 1);
+		assert_eq!(listener.removed.load(Ordering::Relaxed), 0);
+
+		sessions.generation_sessions.remove(&Default::default());
+		assert_eq!(listener.inserted.load(Ordering::Relaxed), 1);
+		assert_eq!(listener.removed.load(Ordering::Relaxed), 1);
 	}
 }

@@ -19,10 +19,11 @@
 use std::fmt;
 
 use ethcore::account_provider::{SignError as AccountError};
-use ethcore::error::{Error as EthcoreError, CallError};
+use ethcore::error::{Error as EthcoreError, ErrorKind, CallError};
 use jsonrpc_core::{futures, Error, ErrorCode, Value};
 use rlp::DecoderError;
 use transaction::Error as TransactionError;
+use ethcore_private_tx::Error as PrivateTransactionError;
 
 mod codes {
 	// NOTE [ToDr] Codes from [-32099, -32000]
@@ -39,6 +40,7 @@ mod codes {
 	pub const ACCOUNT_LOCKED: i64 = -32020;
 	pub const PASSWORD_INVALID: i64 = -32021;
 	pub const ACCOUNT_ERROR: i64 = -32023;
+	pub const PRIVATE_ERROR: i64 = -32024;
 	pub const REQUEST_REJECTED: i64 = -32040;
 	pub const REQUEST_REJECTED_LIMIT: i64 = -32041;
 	pub const REQUEST_NOT_FOUND: i64 = -32042;
@@ -288,10 +290,26 @@ pub fn password(error: AccountError) -> Error {
 	}
 }
 
-pub fn transaction_message(error: TransactionError) -> String {
+pub fn private_message(error: PrivateTransactionError) -> Error {
+	Error {
+		code: ErrorCode::ServerError(codes::PRIVATE_ERROR),
+		message: "Private transactions call failed.".into(),
+		data: Some(Value::String(format!("{:?}", error))),
+	}
+}
+
+pub fn private_message_block_id_not_supported() -> Error {
+	Error {
+		code: ErrorCode::ServerError(codes::PRIVATE_ERROR),
+		message: "Pending block id not supported.".into(),
+		data: None,
+	}
+}
+
+pub fn transaction_message(error: &TransactionError) -> String {
 	use self::TransactionError::*;
 
-	match error {
+	match *error {
 		AlreadyImported => "Transaction with the same hash was already imported.".into(),
 		Old => "Transaction nonce is too low. Try incrementing the nonce.".into(),
 		TooCheapToReplace => {
@@ -312,7 +330,7 @@ pub fn transaction_message(error: TransactionError) -> String {
 		GasLimitExceeded { limit, got } => {
 			format!("Transaction cost exceeds current gas limit. Limit: {}, got: {}. Try decreasing supplied gas.", limit, got)
 		},
-		InvalidSignature(sig) => format!("Invalid signature: {}", sig),
+		InvalidSignature(ref sig) => format!("Invalid signature: {}", sig),
 		InvalidChainId => "Invalid chain id.".into(),
 		InvalidGasLimit(_) => "Supplied gas is beyond limit.".into(),
 		SenderBanned => "Sender is banned in local queue.".into(),
@@ -324,7 +342,7 @@ pub fn transaction_message(error: TransactionError) -> String {
 
 pub fn transaction<T: Into<EthcoreError>>(error: T) -> Error {
 	let error = error.into();
-	if let EthcoreError::Transaction(e) = error {
+	if let ErrorKind::Transaction(ref e) = *error.kind() {
 		Error {
 			code: ErrorCode::ServerError(codes::TRANSACTION_ERROR),
 			message: transaction_message(e),
@@ -373,11 +391,19 @@ pub fn no_light_peers() -> Error {
 	}
 }
 
-pub fn deprecated<T: Into<Option<String>>>(message: T) -> Error {
+pub fn deprecated<S: Into<String>, T: Into<Option<S>>>(message: T) -> Error {
 	Error {
 		code: ErrorCode::ServerError(codes::DEPRECATED),
 		message: "Method deprecated".into(),
-		data: message.into().map(Value::String),
+		data: message.into().map(Into::into).map(Value::String),
+	}
+}
+
+pub fn filter_not_found() -> Error {
+	Error {
+		code: ErrorCode::ServerError(codes::UNSUPPORTED_REQUEST),
+		message: "Filter not found".into(),
+		data: None,
 	}
 }
 

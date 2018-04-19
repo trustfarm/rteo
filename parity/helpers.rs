@@ -19,17 +19,16 @@ use std::io::{Write, BufReader, BufRead};
 use std::time::Duration;
 use std::fs::File;
 use ethereum_types::{U256, clean_0x, Address};
-use kvdb_rocksdb::CompactionProfile;
 use journaldb::Algorithm;
 use ethcore::client::{Mode, BlockId, VMType, DatabaseCompactionProfile, ClientConfig, VerifierType};
-use ethcore::miner::{PendingSet, GasLimit};
-use miner::transaction_queue::PrioritizationStrategy;
+use ethcore::miner::{PendingSet, Penalization};
+use miner::pool::PrioritizationStrategy;
 use cache::CacheConfig;
 use dir::DatabaseDirectories;
 use dir::helpers::replace_home;
 use upgrade::{upgrade, upgrade_data_paths};
-use migration::migrate;
-use ethsync::{validate_node_url, self};
+use sync::{validate_node_url, self};
+use db::migrate;
 use path;
 
 pub fn to_duration(s: &str) -> Result<Duration, String> {
@@ -97,21 +96,20 @@ pub fn to_pending_set(s: &str) -> Result<PendingSet, String> {
 	}
 }
 
-pub fn to_gas_limit(s: &str) -> Result<GasLimit, String> {
+pub fn to_queue_strategy(s: &str) -> Result<PrioritizationStrategy, String> {
 	match s {
-		"auto" => Ok(GasLimit::Auto),
-		"off" => Ok(GasLimit::None),
-		other => Ok(GasLimit::Fixed(to_u256(other)?)),
+		"gas_price" => Ok(PrioritizationStrategy::GasPriceOnly),
+		other => Err(format!("Invalid queue strategy: {}", other)),
 	}
 }
 
-pub fn to_queue_strategy(s: &str) -> Result<PrioritizationStrategy, String> {
-	match s {
-		"gas" => Ok(PrioritizationStrategy::GasAndGasPrice),
-		"gas_price" => Ok(PrioritizationStrategy::GasPriceOnly),
-		"gas_factor" => Ok(PrioritizationStrategy::GasFactorAndGasPrice),
-		other => Err(format!("Invalid queue strategy: {}", other)),
-	}
+pub fn to_queue_penalization(time: Option<u64>) -> Result<Penalization, String> {
+	Ok(match time {
+		Some(threshold_ms) => Penalization::Enabled {
+			offend_threshold: Duration::from_millis(threshold_ms),
+		},
+		None => Penalization::Disabled,
+	})
 }
 
 pub fn to_address(s: Option<String>) -> Result<Address, String> {
@@ -170,7 +168,7 @@ pub fn to_bootnodes(bootnodes: &Option<String>) -> Result<Vec<String>, String> {
 		Some(ref x) if !x.is_empty() => x.split(',').map(|s| {
 			match validate_node_url(s).map(Into::into) {
 				None => Ok(s.to_owned()),
-				Some(ethsync::ErrorKind::AddressResolve(_)) => Err(format!("Failed to resolve hostname of a boot node: {}", s)),
+				Some(sync::ErrorKind::AddressResolve(_)) => Err(format!("Failed to resolve hostname of a boot node: {}", s)),
 				Some(_) => Err(format!("Invalid node address format given for a boot node: {}", s)),
 			}
 		}).collect(),
@@ -180,8 +178,8 @@ pub fn to_bootnodes(bootnodes: &Option<String>) -> Result<Vec<String>, String> {
 }
 
 #[cfg(test)]
-pub fn default_network_config() -> ::ethsync::NetworkConfiguration {
-	use ethsync::{NetworkConfiguration};
+pub fn default_network_config() -> ::sync::NetworkConfiguration {
+	use sync::{NetworkConfiguration};
 	use super::network::IpFilter;
 	NetworkConfiguration {
 		config_path: Some(replace_home(&::dir::default_data_path(), "$BASE/network")),
@@ -259,7 +257,7 @@ pub fn execute_upgrades(
 	base_path: &str,
 	dirs: &DatabaseDirectories,
 	pruning: Algorithm,
-	compaction_profile: CompactionProfile
+	compaction_profile: &DatabaseCompactionProfile
 ) -> Result<(), String> {
 
 	upgrade_data_paths(base_path, dirs, pruning);
@@ -275,7 +273,7 @@ pub fn execute_upgrades(
 	}
 
 	let client_path = dirs.db_path(pruning);
-	migrate(&client_path, pruning, compaction_profile).map_err(|e| format!("{}", e))
+	migrate(&client_path, compaction_profile).map_err(|e| format!("{}", e))
 }
 
 /// Prompts user asking for password.

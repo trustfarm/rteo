@@ -22,6 +22,8 @@ extern crate elastic_array;
 extern crate ethcore_bytes as bytes;
 
 use std::io;
+use std::path::Path;
+use std::sync::Arc;
 use elastic_array::{ElasticArray128, ElasticArray32};
 use bytes::Bytes;
 
@@ -56,14 +58,27 @@ pub enum DBOp {
 		key: ElasticArray32<u8>,
 		value: DBValue,
 	},
-	InsertCompressed {
-		col: Option<u32>,
-		key: ElasticArray32<u8>,
-		value: DBValue,
-	},
 	Delete {
 		col: Option<u32>,
 		key: ElasticArray32<u8>,
+	}
+}
+
+impl DBOp {
+	/// Returns the key associated with this operation.
+	pub fn key(&self) -> &[u8] {
+		match *self {
+			DBOp::Insert { ref key, .. } => key,
+			DBOp::Delete { ref key, .. } => key,
+		}
+	}
+
+	/// Returns the column associated with this operation.
+	pub fn col(&self) -> Option<u32> {
+		match *self {
+			DBOp::Insert { col, .. } => col,
+			DBOp::Delete { col, .. } => col,
+		}
 	}
 }
 
@@ -96,18 +111,6 @@ impl DBTransaction {
 		let mut ekey = ElasticArray32::new();
 		ekey.append_slice(key);
 		self.ops.push(DBOp::Insert {
-			col: col,
-			key: ekey,
-			value: DBValue::from_vec(value),
-		});
-	}
-
-	/// Insert a key-value pair in the transaction. Any existing value will be overwritten upon write.
-	/// Value will be RLP-compressed on flush
-	pub fn put_compressed(&mut self, col: Option<u32>, key: &[u8], value: Bytes) {
-		let mut ekey = ElasticArray32::new();
-		ekey.append_slice(key);
-		self.ops.push(DBOp::InsertCompressed {
 			col: col,
 			key: ekey,
 			value: DBValue::from_vec(value),
@@ -174,4 +177,11 @@ pub trait KeyValueDB: Sync + Send {
 
 	/// Attempt to replace this database with a new one located at the given path.
 	fn restore(&self, new_db: &str) -> Result<()>;
+}
+
+/// Generic key-value database handler. This trait contains one function `open`. When called, it opens database with a
+/// predefined config.
+pub trait KeyValueDBHandler: Send + Sync {
+	/// Open the predefined key-value database.
+	fn open(&self, path: &Path) -> Result<Arc<KeyValueDB>>;
 }

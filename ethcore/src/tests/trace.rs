@@ -24,7 +24,7 @@ use ethereum_types::{U256, Address};
 use io::*;
 use spec::*;
 use client::*;
-use tests::helpers::*;
+use test_helpers::get_temp_state_db;
 use client::{BlockChainClient, Client, ClientConfig};
 use kvdb_rocksdb::{Database, DatabaseConfig};
 use std::sync::Arc;
@@ -50,7 +50,7 @@ fn can_trace_block_and_uncle_reward() {
 		client_config,
 		&spec,
 		client_db,
-		Arc::new(Miner::with_spec(&spec)),
+		Arc::new(Miner::new_for_tests(&spec, None)),
 		IoChannel::disconnected(),
 	).unwrap();
 
@@ -88,7 +88,6 @@ fn can_trace_block_and_uncle_reward() {
 		vec![],
 		false,
 	).unwrap();
-	root_block.set_difficulty(U256::from(0x20000));
 	rolling_timestamp += 10;
 	root_block.set_timestamp(rolling_timestamp);
 
@@ -98,7 +97,7 @@ fn can_trace_block_and_uncle_reward() {
 		panic!("error importing block which is valid by definition: {:?}", e);
 	}
 
-	last_header = BlockView::new(&root_block.rlp_bytes()).header();
+	last_header = view!(BlockView, &root_block.rlp_bytes()).header();
 	let root_header = last_header.clone();
 	db = root_block.drain();
 
@@ -117,7 +116,6 @@ fn can_trace_block_and_uncle_reward() {
 		vec![],
 		false,
 	).unwrap();
-	parent_block.set_difficulty(U256::from(0x20000));
 	rolling_timestamp += 10;
 	parent_block.set_timestamp(rolling_timestamp);
 
@@ -127,7 +125,7 @@ fn can_trace_block_and_uncle_reward() {
 		panic!("error importing block which is valid by definition: {:?}", e);
 	}
 
-	last_header = BlockView::new(&parent_block.rlp_bytes()).header();
+	last_header = view!(BlockView,&parent_block.rlp_bytes()).header();
 	db = parent_block.drain();
 
 	last_hashes.push(last_header.hash());
@@ -145,7 +143,6 @@ fn can_trace_block_and_uncle_reward() {
 		vec![],
 		false
 		).unwrap();
-	block.set_difficulty(U256::from(0x20000));
 	rolling_timestamp += 10;
 	block.set_timestamp(rolling_timestamp);
 

@@ -17,15 +17,16 @@
 use std::fmt;
 use std::io::Error as IoError;
 use ethkey;
-use ethcrypto;
+use crypto;
 use super::types::all::ServerKeyId;
 
 pub use super::traits::NodeKeyPair;
-pub use super::types::all::{NodeId, EncryptedDocumentKeyShadow};
+pub use super::types::all::{NodeId, Requester, EncryptedDocumentKeyShadow};
 pub use super::acl_storage::AclStorage;
 pub use super::key_storage::{KeyStorage, DocumentKeyShare, DocumentKeyShareVersion};
 pub use super::key_server_set::{is_migration_required, KeyServerSet, KeyServerSetSnapshot, KeyServerSetMigration};
-pub use super::serialization::{SerializableSignature, SerializableH256, SerializableSecret, SerializablePublic, SerializableMessageHash};
+pub use super::serialization::{SerializableSignature, SerializableH256, SerializableSecret, SerializablePublic,
+	SerializableRequester, SerializableMessageHash, SerializableAddress};
 pub use self::cluster::{ClusterCore, ClusterConfiguration, ClusterClient};
 pub use self::cluster_sessions::{ClusterSession, ClusterSessionsListener};
 #[cfg(test)]
@@ -113,6 +114,8 @@ pub enum Error {
 	ExclusiveSessionActive,
 	/// Can't start exclusive session, because there are other active sessions.
 	HasActiveSessions,
+	/// Insufficient requester data.
+	InsufficientRequesterData(String),
 }
 
 impl From<ethkey::Error> for Error {
@@ -121,8 +124,8 @@ impl From<ethkey::Error> for Error {
 	}
 }
 
-impl From<ethcrypto::Error> for Error {
-	fn from(err: ethcrypto::Error) -> Self {
+impl From<crypto::Error> for Error {
+	fn from(err: crypto::Error) -> Self {
 		Error::EthKey(err.into())
 	}
 }
@@ -161,6 +164,7 @@ impl fmt::Display for Error {
 			Error::AccessDenied => write!(f, "Access denied"),
 			Error::ExclusiveSessionActive => write!(f, "Exclusive session active"),
 			Error::HasActiveSessions => write!(f, "Unable to start exclusive session"),
+			Error::InsufficientRequesterData(ref e) => write!(f, "Insufficient requester data: {}", e),
 		}
 	}
 }
@@ -182,7 +186,8 @@ pub use self::admin_sessions::share_change_session;
 pub use self::client_sessions::decryption_session;
 pub use self::client_sessions::encryption_session;
 pub use self::client_sessions::generation_session;
-pub use self::client_sessions::signing_session;
+pub use self::client_sessions::signing_session_ecdsa;
+pub use self::client_sessions::signing_session_schnorr;
 
 mod cluster;
 mod cluster_sessions;

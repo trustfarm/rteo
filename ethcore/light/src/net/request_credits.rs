@@ -29,9 +29,9 @@
 use request::{self, Request};
 use super::error::Error;
 
-use rlp::*;
+use rlp::{Rlp, RlpStream, Decodable, Encodable, DecoderError};
 use ethereum_types::U256;
-use time::{Duration, SteadyTime};
+use std::time::{Duration, Instant};
 
 /// Credits value.
 ///
@@ -41,7 +41,7 @@ use time::{Duration, SteadyTime};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Credits {
 	estimate: U256,
-	recharge_point: SteadyTime,
+	recharge_point: Instant,
 }
 
 impl Credits {
@@ -53,7 +53,7 @@ impl Credits {
 	/// a response to a request.
 	pub fn update_to(&mut self, value: U256) {
 		self.estimate = value;
-		self.recharge_point = SteadyTime::now();
+		self.recharge_point = Instant::now();
 	}
 
 	/// Maintain ratio to current limit against an old limit.
@@ -162,7 +162,7 @@ impl Encodable for CostTable {
 }
 
 impl Decodable for CostTable {
-	fn decode(rlp: &UntrustedRlp) -> Result<Self, DecoderError> {
+	fn decode(rlp: &Rlp) -> Result<Self, DecoderError> {
 		let base = rlp.val_at(0)?;
 
 		let mut headers = None;
@@ -235,23 +235,30 @@ impl FlowParams {
 
 	/// Create new flow parameters from ,
 	/// proportion of total capacity which should be given to a peer,
-	/// and number of seconds of stored capacity a peer can accumulate.
-	pub fn from_request_times<F: Fn(::request::Kind) -> u64>(
-		request_time_ns: F,
+	/// and stored capacity a peer can accumulate.
+	pub fn from_request_times<F: Fn(::request::Kind) -> Duration>(
+		request_time: F,
 		load_share: f64,
-		max_stored_seconds: u64
+		max_stored: Duration
 	) -> Self {
 		use request::Kind;
 
 		let load_share = load_share.abs();
 
 		let recharge: u64 = 100_000_000;
-		let max = recharge.saturating_mul(max_stored_seconds);
+		let max = {
+			let sec = max_stored.as_secs().saturating_mul(recharge);
+			let nanos = (max_stored.subsec_nanos() as u64).saturating_mul(recharge) / 1_000_000_000;
+			sec + nanos
+		};
 
 		let cost_for_kind = |kind| {
 			// how many requests we can handle per second
-			let ns = request_time_ns(kind);
-			let second_duration = 1_000_000_000f64 / ns as f64;
+			let rq_dur = request_time(kind);
+			let second_duration = {
+				let as_ns = rq_dur.as_secs() as f64 * 1_000_000_000f64 + rq_dur.subsec_nanos() as f64;
+				1_000_000_000f64 / as_ns
+			};
 
 			// scale by share of the load given to this peer.
 			let serve_per_second = second_duration * load_share;
@@ -320,7 +327,7 @@ impl FlowParams {
 	/// and number of requests made.
 	pub fn compute_cost(&self, request: &Request) -> Option<U256> {
 		match *request {
-			Request::Headers(ref req) => self.costs.headers.map(|c| c * req.max.into()),
+			Request::Headers(ref req) => self.costs.headers.map(|c| c * U256::from(req.max)),
 			Request::HeaderProof(_) => self.costs.header_proof,
 			Request::TransactionIndex(_) => self.costs.transaction_index,
 			Request::Body(_) => self.costs.body,
@@ -351,19 +358,19 @@ impl FlowParams {
 	pub fn create_credits(&self) -> Credits {
 		Credits {
 			estimate: self.limit,
-			recharge_point: SteadyTime::now(),
+			recharge_point: Instant::now(),
 		}
 	}
 
 	/// Recharge the given credits based on time passed since last
 	/// update.
 	pub fn recharge(&self, credits: &mut Credits) {
-		let now = SteadyTime::now();
+		let now = Instant::now();
 
 		// recompute and update only in terms of full seconds elapsed
 		// in order to keep the estimate as an underestimate.
-		let elapsed = (now - credits.recharge_point).num_seconds();
-		credits.recharge_point = credits.recharge_point + Duration::seconds(elapsed);
+		let elapsed = (now - credits.recharge_point).as_secs();
+		credits.recharge_point = credits.recharge_point + Duration::from_secs(elapsed);
 
 		let elapsed: U256 = elapsed.into();
 
@@ -426,24 +433,24 @@ mod tests {
 	#[test]
 	fn scale_by_load_share_and_time() {
 		let flow_params = FlowParams::from_request_times(
-			|_| 10_000,
+			|_| Duration::new(0, 10_000),
 			0.05,
-			60,
+			Duration::from_secs(60),
 		);
 
 		let flow_params2 = FlowParams::from_request_times(
-			|_| 10_000,
+			|_| Duration::new(0, 10_000),
 			0.1,
-			60,
+			Duration::from_secs(60),
 		);
 
 		let flow_params3 = FlowParams::from_request_times(
-			|_| 5_000,
+			|_| Duration::new(0, 5_000),
 			0.05,
-			60,
+			Duration::from_secs(60),
 		);
 
 		assert_eq!(flow_params2.costs, flow_params3.costs);
-		assert_eq!(flow_params.costs.headers.unwrap(), flow_params2.costs.headers.unwrap() * 2.into());
+		assert_eq!(flow_params.costs.headers.unwrap(), flow_params2.costs.headers.unwrap() * 2u32);
 	}
 }

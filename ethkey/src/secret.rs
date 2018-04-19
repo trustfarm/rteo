@@ -18,34 +18,55 @@ use std::fmt;
 use std::ops::Deref;
 use std::str::FromStr;
 use rustc_hex::ToHex;
+use secp256k1::constants::{SECRET_KEY_SIZE as SECP256K1_SECRET_KEY_SIZE};
 use secp256k1::key;
 use ethereum_types::H256;
+use mem::Memzero;
 use {Error, SECP256K1};
 
 #[derive(Clone, PartialEq, Eq)]
 pub struct Secret {
-	inner: H256,
+	inner: Memzero<H256>,
 }
 
 impl ToHex for Secret {
 	fn to_hex(&self) -> String {
-		self.inner.to_hex()
+		format!("{:x}", *self.inner)
+	}
+}
+
+impl fmt::LowerHex for Secret {
+	fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
+		self.inner.fmt(fmt)
 	}
 }
 
 impl fmt::Debug for Secret {
+	fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
+		self.inner.fmt(fmt)
+	}
+}
+
+impl fmt::Display for Secret {
 	fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
 		write!(fmt, "Secret: 0x{:x}{:x}..{:x}{:x}", self.inner[0], self.inner[1], self.inner[30], self.inner[31])
 	}
 }
 
 impl Secret {
-	pub fn from_slice(key: &[u8]) -> Self {
-		assert_eq!(32, key.len(), "Caller should provide 32-byte length slice");
-
+	/// Creates a `Secret` from the given slice, returning `None` if the slice length != 32.
+	pub fn from_slice(key: &[u8]) -> Option<Self> {
+		if key.len() != 32 {
+			return None
+		}
 		let mut h = H256::default();
 		h.copy_from_slice(&key[0..32]);
-		Secret { inner: h }
+		Some(Secret { inner: Memzero::from(h) })
+	}
+
+	/// Creates zero key, which is invalid for crypto operations, but valid for math operation.
+	pub fn zero() -> Self {
+		Secret { inner: Memzero::from(H256::default()) }
 	}
 
 	/// Imports and validates the key.
@@ -61,51 +82,91 @@ impl Secret {
 
 	/// Inplace add one secret key to another (scalar + scalar)
 	pub fn add(&mut self, other: &Secret) -> Result<(), Error> {
-		let mut key_secret = self.to_secp256k1_secret()?;
-		let other_secret = other.to_secp256k1_secret()?;
-		key_secret.add_assign(&SECP256K1, &other_secret)?;
+		match (self.is_zero(), other.is_zero()) {
+			(true, true) | (false, true) => Ok(()),
+			(true, false) => {
+				*self = other.clone();
+				Ok(())
+			},
+			(false, false) => {
+				let mut key_secret = self.to_secp256k1_secret()?;
+				let other_secret = other.to_secp256k1_secret()?;
+				key_secret.add_assign(&SECP256K1, &other_secret)?;
 
-		*self = key_secret.into();
-		Ok(())
+				*self = key_secret.into();
+				Ok(())
+			},
+		}
 	}
 
 	/// Inplace subtract one secret key from another (scalar - scalar)
 	pub fn sub(&mut self, other: &Secret) -> Result<(), Error> {
-		let mut key_secret = self.to_secp256k1_secret()?;
-		let mut other_secret = other.to_secp256k1_secret()?;
-		other_secret.mul_assign(&SECP256K1, &key::MINUS_ONE_KEY)?;
-		key_secret.add_assign(&SECP256K1, &other_secret)?;
+		match (self.is_zero(), other.is_zero()) {
+			(true, true) | (false, true) => Ok(()),
+			(true, false) => {
+				*self = other.clone();
+				self.neg()
+			},
+			(false, false) => {
+				let mut key_secret = self.to_secp256k1_secret()?;
+				let mut other_secret = other.to_secp256k1_secret()?;
+				other_secret.mul_assign(&SECP256K1, &key::MINUS_ONE_KEY)?;
+				key_secret.add_assign(&SECP256K1, &other_secret)?;
 
-		*self = key_secret.into();
-		Ok(())
+				*self = key_secret.into();
+				Ok(())
+			},
+		}
 	}
 
 	/// Inplace decrease secret key (scalar - 1)
 	pub fn dec(&mut self) -> Result<(), Error> {
-		let mut key_secret = self.to_secp256k1_secret()?;
-		key_secret.add_assign(&SECP256K1, &key::MINUS_ONE_KEY)?;
+		match self.is_zero() {
+			true => {
+				*self = key::MINUS_ONE_KEY.into();
+				Ok(())
+			},
+			false => {
+				let mut key_secret = self.to_secp256k1_secret()?;
+				key_secret.add_assign(&SECP256K1, &key::MINUS_ONE_KEY)?;
 
-		*self = key_secret.into();
-		Ok(())
+				*self = key_secret.into();
+				Ok(())
+			},
+		}
 	}
 
 	/// Inplace multiply one secret key to another (scalar * scalar)
 	pub fn mul(&mut self, other: &Secret) -> Result<(), Error> {
-		let mut key_secret = self.to_secp256k1_secret()?;
-		let other_secret = other.to_secp256k1_secret()?;
-		key_secret.mul_assign(&SECP256K1, &other_secret)?;
+		match (self.is_zero(), other.is_zero()) {
+			(true, true) | (true, false) => Ok(()),
+			(false, true) => {
+				*self = Self::zero();
+				Ok(())
+			},
+			(false, false) => {
+				let mut key_secret = self.to_secp256k1_secret()?;
+				let other_secret = other.to_secp256k1_secret()?;
+				key_secret.mul_assign(&SECP256K1, &other_secret)?;
 
-		*self = key_secret.into();
-		Ok(())
+				*self = key_secret.into();
+				Ok(())
+			},
+		}
 	}
 
 	/// Inplace negate secret key (-scalar)
 	pub fn neg(&mut self) -> Result<(), Error> {
-		let mut key_secret = self.to_secp256k1_secret()?;
-		key_secret.mul_assign(&SECP256K1, &key::MINUS_ONE_KEY)?;
+		match self.is_zero() {
+			true => Ok(()),
+			false => {
+				let mut key_secret = self.to_secp256k1_secret()?;
+				key_secret.mul_assign(&SECP256K1, &key::MINUS_ONE_KEY)?;
 
-		*self = key_secret.into();
-		Ok(())
+				*self = key_secret.into();
+				Ok(())
+			},
+		}
 	}
 
 	/// Inplace inverse secret key (1 / scalar)
@@ -120,6 +181,10 @@ impl Secret {
 	/// Compute power of secret key inplace (secret ^ pow).
 	/// This function is not intended to be used with large powers.
 	pub fn pow(&mut self, pow: usize) -> Result<(), Error> {
+		if self.is_zero() {
+			return Ok(());
+		}
+
 		match pow {
 			0 => *self = key::ONE_KEY.into(),
 			1 => (),
@@ -147,9 +212,15 @@ impl FromStr for Secret {
 	}
 }
 
+impl From<[u8; 32]> for Secret {
+	fn from(k: [u8; 32]) -> Self {
+		Secret { inner: Memzero::from(H256(k)) }
+	}
+}
+
 impl From<H256> for Secret {
 	fn from(s: H256) -> Self {
-		Secret::from_slice(&s)
+		s.0.into()
 	}
 }
 
@@ -161,7 +232,9 @@ impl From<&'static str> for Secret {
 
 impl From<key::SecretKey> for Secret {
 	fn from(key: key::SecretKey) -> Self {
-		Self::from_slice(&key[0..32])
+		let mut a = [0; SECP256K1_SECRET_KEY_SIZE];
+		a.copy_from_slice(&key[0 .. SECP256K1_SECRET_KEY_SIZE]);
+		a.into()
 	}
 }
 

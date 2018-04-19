@@ -19,27 +19,25 @@
 use std::sync::{Weak, Arc};
 
 use ethcore::block_status::BlockStatus;
-use ethcore::client::{ClientReport, EnvInfo};
+use ethcore::client::{ClientReport, EnvInfo, ClientIoMessage};
 use ethcore::engines::{epoch, EthEngine, EpochChange, EpochTransition, Proof};
 use ethcore::machine::EthereumMachine;
-use ethcore::error::BlockImportError;
+use ethcore::error::{Error, BlockImportError};
 use ethcore::ids::BlockId;
 use ethcore::header::{BlockNumber, Header};
 use ethcore::verification::queue::{self, HeaderQueue};
 use ethcore::blockchain_info::BlockChainInfo;
-use ethcore::spec::Spec;
-use ethcore::service::ClientIoMessage;
+use ethcore::spec::{Spec, SpecHardcodedSync};
 use ethcore::encoded;
 use io::IoChannel;
 use parking_lot::{Mutex, RwLock};
 use ethereum_types::{H256, U256};
 use futures::{IntoFuture, Future};
 
-use kvdb::{self, KeyValueDB};
-use kvdb_rocksdb::CompactionProfile;
+use kvdb::KeyValueDB;
 
 use self::fetch::ChainDataFetcher;
-use self::header_chain::{AncestryIter, HeaderChain};
+use self::header_chain::{AncestryIter, HeaderChain, HardcodedSync};
 
 use cache::Cache;
 
@@ -57,16 +55,12 @@ pub struct Config {
 	pub queue: queue::Config,
 	/// Chain column in database.
 	pub chain_column: Option<u32>,
-	/// Database cache size. `None` => rocksdb default.
-	pub db_cache_size: Option<usize>,
-	/// State db compaction profile
-	pub db_compaction: CompactionProfile,
-	/// Should db have WAL enabled?
-	pub db_wal: bool,
 	/// Should it do full verification of blocks?
 	pub verify_full: bool,
 	/// Should it check the seal of blocks?
 	pub check_seal: bool,
+	/// Disable hardcoded sync.
+	pub no_hardcoded_sync: bool,
 }
 
 impl Default for Config {
@@ -74,11 +68,9 @@ impl Default for Config {
 		Config {
 			queue: Default::default(),
 			chain_column: None,
-			db_cache_size: None,
-			db_compaction: CompactionProfile::default(),
-			db_wal: true,
 			verify_full: true,
 			check_seal: true,
+			no_hardcoded_sync: false,
 		}
 	}
 }
@@ -186,11 +178,14 @@ impl<T: ChainDataFetcher> Client<T> {
 		fetcher: T,
 		io_channel: IoChannel<ClientIoMessage>,
 		cache: Arc<Mutex<Cache>>
-	) -> Result<Self, kvdb::Error> {
+	) -> Result<Self, Error> {
 		Ok(Client {
 			queue: HeaderQueue::new(config.queue, spec.engine.clone(), io_channel, config.check_seal),
 			engine: spec.engine.clone(),
-			chain: HeaderChain::new(db.clone(), chain_col, &spec, cache)?,
+			chain: {
+				let hs_cfg = if config.no_hardcoded_sync { HardcodedSync::Deny } else { HardcodedSync::Allow };
+				HeaderChain::new(db.clone(), chain_col, &spec, cache, hs_cfg)?
+			},
 			report: RwLock::new(ClientReport::default()),
 			import_lock: Mutex::new(()),
 			db: db,
@@ -200,31 +195,17 @@ impl<T: ChainDataFetcher> Client<T> {
 		})
 	}
 
+	/// Generates the specifications for hardcoded sync. This is typically only called manually
+	/// from time to time by a Parity developer in order to update the chain specifications.
+	///
+	/// Returns `None` if we are at the genesis block.
+	pub fn read_hardcoded_sync(&self) -> Result<Option<SpecHardcodedSync>, Error> {
+		self.chain.read_hardcoded_sync()
+	}
+
 	/// Adds a new `LightChainNotify` listener.
 	pub fn add_listener(&self, listener: Weak<LightChainNotify>) {
 		self.listeners.write().push(listener);
-	}
-
-	/// Create a new `Client` backed purely in-memory.
-	/// This will ignore all database options in the configuration.
-	pub fn in_memory(
-		config: Config,
-		spec: &Spec,
-		fetcher: T,
-		io_channel: IoChannel<ClientIoMessage>,
-		cache: Arc<Mutex<Cache>>
-	) -> Self {
-		let db = ::kvdb_memorydb::create(0);
-
-		Client::new(
-			config,
-			Arc::new(db),
-			None,
-			spec,
-			fetcher,
-			io_channel,
-			cache
-		).expect("New DB creation infallible; qed")
 	}
 
 	/// Import a header to the queue for additional verification.
@@ -606,6 +587,12 @@ impl<T: ChainDataFetcher> LightChainClient for Client<T> {
 	}
 }
 
+impl<T: ChainDataFetcher> ::ethcore::client::ChainInfo for Client<T> {
+	fn chain_info(&self) -> BlockChainInfo {
+		Client::chain_info(self)
+	}
+}
+
 impl<T: ChainDataFetcher> ::ethcore::client::EngineClient for Client<T> {
 	fn update_sealing(&self) { }
 	fn submit_seal(&self, _block_hash: H256, _seal: Vec<Vec<u8>>) { }
@@ -619,15 +606,15 @@ impl<T: ChainDataFetcher> ::ethcore::client::EngineClient for Client<T> {
 		})
 	}
 
-	fn chain_info(&self) -> BlockChainInfo {
-		Client::chain_info(self)
-	}
-
 	fn as_full_client(&self) -> Option<&::ethcore::client::BlockChainClient> {
 		None
 	}
 
 	fn block_number(&self, id: BlockId) -> Option<BlockNumber> {
 		self.block_header(id).map(|hdr| hdr.number())
+	}
+
+	fn block_header(&self, id: BlockId) -> Option<encoded::Header> {
+		Client::block_header(self, id)
 	}
 }

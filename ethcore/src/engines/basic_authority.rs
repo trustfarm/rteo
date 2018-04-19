@@ -19,7 +19,7 @@
 use std::sync::{Weak, Arc};
 use ethereum_types::{H256, H520, Address};
 use parking_lot::RwLock;
-use ethkey::{recover, public_to_address, Signature};
+use ethkey::{self, Signature};
 use account_provider::AccountProvider;
 use block::*;
 use engines::{Engine, Seal, ConstructedVerifier, EngineError};
@@ -28,7 +28,6 @@ use ethjson;
 use header::Header;
 use client::EngineClient;
 use machine::{AuxiliaryData, Call, EthereumMachine};
-use semantic_version::SemanticVersion;
 use super::signer::EngineSigner;
 use super::validator_set::{ValidatorSet, SimpleList, new_validator_set};
 
@@ -58,11 +57,11 @@ impl super::EpochVerifier<EthereumMachine> for EpochVerifier {
 }
 
 fn verify_external(header: &Header, validators: &ValidatorSet) -> Result<(), Error> {
-	use rlp::UntrustedRlp;
+	use rlp::Rlp;
 
 	// Check if the signature belongs to a validator, can depend on parent state.
-	let sig = UntrustedRlp::new(&header.seal()[0]).as_val::<H520>()?;
-	let signer = public_to_address(&recover(&sig.into(), &header.bare_hash())?);
+	let sig = Rlp::new(&header.seal()[0]).as_val::<H520>()?;
+	let signer = ethkey::public_to_address(&ethkey::recover(&sig.into(), &header.bare_hash())?);
 
 	if *header.author() != signer {
 		return Err(EngineError::NotAuthorized(*header.author()).into())
@@ -94,12 +93,11 @@ impl BasicAuthority {
 
 impl Engine<EthereumMachine> for BasicAuthority {
 	fn name(&self) -> &str { "BasicAuthority" }
-	fn version(&self) -> SemanticVersion { SemanticVersion::new(1, 0, 0) }
 
 	fn machine(&self) -> &EthereumMachine { &self.machine }
 
 	// One field - the signature
-	fn seal_fields(&self) -> usize { 1 }
+	fn seal_fields(&self, _header: &Header) -> usize { 1 }
 
 	fn seals_internally(&self) -> Option<bool> {
 		Some(self.signer.read().is_some())
@@ -187,7 +185,7 @@ impl Engine<EthereumMachine> for BasicAuthority {
 	}
 
 	fn sign(&self, hash: H256) -> Result<Signature, Error> {
-		self.signer.read().sign(hash).map_err(Into::into)
+		Ok(self.signer.read().sign(hash)?)
 	}
 
 	fn snapshot_components(&self) -> Option<Box<::snapshot::SnapshotComponents>> {
@@ -201,23 +199,24 @@ mod tests {
 	use hash::keccak;
 	use ethereum_types::H520;
 	use block::*;
-	use tests::helpers::*;
+	use test_helpers::get_temp_state_db;
 	use account_provider::AccountProvider;
 	use header::Header;
 	use spec::Spec;
 	use engines::Seal;
+	use tempdir::TempDir;
 
 	/// Create a new test chain spec with `BasicAuthority` consensus engine.
 	fn new_test_authority() -> Spec {
 		let bytes: &[u8] = include_bytes!("../../res/basic_authority.json");
-		Spec::load(&::std::env::temp_dir(), bytes).expect("invalid chain spec")
+		let tempdir = TempDir::new("").unwrap();
+		Spec::load(&tempdir.path(), bytes).expect("invalid chain spec")
 	}
 
 	#[test]
 	fn has_valid_metadata() {
 		let engine = new_test_authority().engine;
 		assert!(!engine.name().is_empty());
-		assert!(engine.version().major >= 1);
 	}
 
 	#[test]
