@@ -278,6 +278,7 @@ impl Configuration {
 					tracing: tracing,
 					fat_db: fat_db,
 					at: to_block_id(&self.args.arg_export_state_at)?,
+					offset: self.args.arg_export_state_offset,
 					storage: !self.args.flag_export_state_no_storage,
 					code: !self.args.flag_export_state_no_code,
 					min_balance: self.args.arg_export_state_min_balance.and_then(|s| to_u256(&s).ok()),

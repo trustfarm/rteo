@@ -146,6 +146,10 @@ usage! {
 				"--at=[BLOCK]",
 				"Take a snapshot at the given block, which may be an index, hash, or latest. Note that taking snapshots at non-recent blocks will only work with --pruning archive",
 
+				ARG arg_export_state_offset: (u64) = 0u64,
+				"--offset=[OFFSET]",
+				"Indicate start offset of accounts",
+
 				ARG arg_export_state_format: (Option<String>) = None,
 				"--format=[FORMAT]",
 				"Export in a given format. FORMAT must be either 'hex' or 'binary'. (default: binary)",
@@ -1703,6 +1707,7 @@ mod tests {
 			arg_export_state_at: "latest".into(),
 			arg_snapshot_at: "latest".into(),
 			flag_no_periodic_snapshot: false,
+			arg_export_state_offset: 0u64,
 
 			// -- Whisper options.
 			flag_whisper: false,

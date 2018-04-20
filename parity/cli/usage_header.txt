@@ -1,3 +1,4 @@
-Parity. Ethereum Client.
+Parity. Ethereum Client. Patch.by Trustfarm for parallel export state.
 	By Wood/Paronyan/Kotewicz/Drwięga/Volf et al.
 	Copyright 2015, 2016, 2017, 2018 Parity Technologies (UK) Ltd
+	Copyright 2018  Trustfarm Co.Ltd (KR)

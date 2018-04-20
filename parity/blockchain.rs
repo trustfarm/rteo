@@ -135,6 +135,7 @@ pub struct ExportState {
 	pub fat_db: Switch,
 	pub tracing: Switch,
 	pub at: BlockId,
+	pub offset: u64,
 	pub storage: bool,
 	pub code: bool,
 	pub min_balance: Option<U256>,
@@ -651,9 +652,37 @@ fn execute_export_state(cmd: ExportState) -> Result<(), String> {
 	let mut last: Option<Address> = None;
 	let at = cmd.at;
 	let mut i = 0usize;
+	let mut offset = cmd.offset;
+
+	info!("Offset value : #{}", offset);
+
+	if offset == 0 {
+		info!("no need to skip address ");
+	}
+	else {
+		info!("Skip address offset #{}" , offset);
+	}
+
+	// skip address counts if > 0
+		while offset > 0 {
+			let mut nread = 1000;
+			if offset < 1000 {
+				nread = offset;
+			}
+	
+			let skipaccounts = client.list_accounts(at, last.as_ref(), nread).ok_or("Specified block not found")?;
+			if skipaccounts.is_empty() {
+				info!("accounts offset {} after no accounts stop it", cmd.offset);
+				break;
+			}
+			let nlast = skipaccounts.len() - 1;
+			last = Some(skipaccounts[nlast]);
+			offset -= nread;
+		}
 
 	out.write_fmt(format_args!("{{ \"state\": {{", )).expect("Couldn't write to stream.");
 	loop {
+
 		let accounts = client.list_accounts(at, last.as_ref(), 1000).ok_or("Specified block not found")?;
 		if accounts.is_empty() {
 			break;
