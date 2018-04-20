@@ -4,6 +4,9 @@
 *.rlib
 *.dll
 
+# trustfarm local works output
+*.state
+
 # Executables
 *.exe
 
