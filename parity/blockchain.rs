@@ -653,8 +653,9 @@ fn execute_export_state(cmd: ExportState) -> Result<(), String> {
 	let at = cmd.at;
 	let mut i = 0usize;
 	let mut offset = cmd.offset;
+	let mut nskip = 0u64;
 
-	info!("Offset value : #{}", offset);
+	info!("Account Offset value : #{}", offset);
 
 	if offset == 0 {
 		info!("no need to skip address ");
@@ -677,7 +678,11 @@ fn execute_export_state(cmd: ExportState) -> Result<(), String> {
 			}
 			let nlast = skipaccounts.len() - 1;
 			last = Some(skipaccounts[nlast]);
-			offset -= nread;
+			offset -= nlast as u64;
+			nskip += nlast as u64;
+			if nskip % 100000 == 0 {
+				info!("Skip progress #{}", nskip);
+			}
 		}
 
 	out.write_fmt(format_args!("{{ \"state\": {{", )).expect("Couldn't write to stream.");
