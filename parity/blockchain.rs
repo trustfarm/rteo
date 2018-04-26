@@ -237,7 +237,7 @@ fn execute_import_light(cmd: ImportBlockchain) -> Result<(), String> {
 	let format = match cmd.format {
 		Some(format) => format,
 		None => {
-			first_read = instream.read(&mut first_bytes).map_err(|_| "Error reading from the file/stream.")?;
+			first_read = instream.read(&mut first_bytes).map_err(|_| format!("{} Error reading from the file/stream.", line!()) )?;
 			match first_bytes[0] {
 				0xf9 => DataFormat::Binary,
 				_ => DataFormat::Hex,
@@ -291,7 +291,7 @@ fn execute_import_light(cmd: ImportBlockchain) -> Result<(), String> {
 				let s = line.map_err(|_| "Error reading from the file/stream.")?;
 				let s = if first_read > 0 {from_utf8(&first_bytes).unwrap().to_owned() + &(s[..])} else {s};
 				first_read = 0;
-				let bytes = s.from_hex().map_err(|_| "Invalid hex in file/stream.")?;
+				let bytes = s.from_hex().map_err(|_| format!("{} Invalid hex in file/stream.",line!()) )?;
 				do_import(bytes)?;
 			}
 		}
@@ -459,10 +459,12 @@ fn execute_import(cmd: ImportBlockchain) -> Result<(), String> {
 		}
 		DataFormat::Hex => {
 			for line in BufReader::new(instream).lines() {
+				let current_line = line!();
+		
 				let s = line.map_err(|_| "Error reading from the file/stream.")?;
 				let s = if first_read > 0 {from_utf8(&first_bytes).unwrap().to_owned() + &(s[..])} else {s};
 				first_read = 0;
-				let bytes = s.from_hex().map_err(|_| "Invalid hex in file/stream.")?;
+				let bytes = s.from_hex().map_err(|_| format!("{} Invalid hex in file/stream.", current_line) )?;
 				do_import(bytes)?;
 			}
 		}

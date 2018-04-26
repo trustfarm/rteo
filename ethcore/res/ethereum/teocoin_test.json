@@ -1,0 +1,74 @@
+{
+    "name":"TrusETHreOrgin TestNet",
+    "dataDir":"TEOcoin_test",
+    "engine":{
+        "Ethash":{
+            "params":{
+                "minimumDifficulty":"0x020000",
+                "difficultyBoundDivisor":"0x0800",
+                "durationLimit":"0x0d",
+                "homesteadTransition":"0x0",
+                "eip100bTransition":"0x0",
+                "eip150Transition":"0x0",
+                "eip160Transition":"0x0",
+                "eip161abcTransition":"0x0",
+                "eip161dTransition":"0x0",
+                "eip649Transition":"0x0",
+                "blockReward":"0x4563918244F40000",
+                "teip0Transition":"0x0",
+                "teip0SSZReward": "0x6f05b59d3b20000",
+                "teip0SSZAccount": "53fab079b2b282cb5d9ac97735b67098c1a14e64"
+            }
+        }
+    },
+    "params":{
+        "gasLimitBoundDivisor":"0x0400",
+        "registrar":"0x5C271c4C9A67E7D73b7b3669d47504741354f21D",
+        "accountStartNonce":"0x00",
+        "maximumExtraDataSize":"0x20",
+        "minGasLimit":"0x1388",
+        "networkID":"0x8282",
+        "maxCodeSize": "0x6000",
+        "maxCodeSizeTransition": "0x0",
+        "eip140Transition": "0x0",
+        "eip155Transition": "0x0",
+        "eip98Transition": "0x7fffffffffffff",
+        "eip86Transition": "0x7fffffffffffff",
+        "eip211Transition": "0x0",
+        "eip214Transition": "0x0",
+        "eip658Transition": "0x0"
+    },
+    "genesis": {
+        "seal": {
+            "ethereum": {
+                "nonce": "0x0000000000000088",
+                "mixHash": "0x0000000000000000000000000000000000000000000000000000000000000000"
+            }
+        },
+        "difficulty": "0x40000",
+        "author": "0x0000000000000000000000000000000000000000",
+        "timestamp": "0x00",
+        "parentHash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+        "extraData": "0x547275737445544872654f726967696e546573744e6574",
+        "gasLimit": "0x1388"
+    },
+    "nodes":[
+        "enode://c9de732065ec6397ffc350561a61bf51167a17718af2209db6275e8f55ad7e8ed01c66c308d3ce0f8dbdd214311f108453cc87f60a910e6e81289ee53549d2b4@222.99.61.250:61637",
+        "enode: //c9de732065ec6397ffc350561a61bf51167a17718af2209db6275e8f55ad7e8ed01c66c308d3ce0f8dbdd214311f108453cc87f60a910e6e81289ee53549d2b4@192.168.0.31:30303"
+    
+    ],
+    "accounts": {
+ 		"0000000000000000000000000000000000000001": { "builtin": { "name": "ecrecover", "pricing": { "linear": { "base": 3000, "word": 0 } } } },
+		"0000000000000000000000000000000000000002": { "builtin": { "name": "sha256", "pricing": { "linear": { "base": 60, "word": 12 } } } },
+		"0000000000000000000000000000000000000003": { "builtin": { "name": "ripemd160", "pricing": { "linear": { "base": 600, "word": 120 } } } },
+		"0000000000000000000000000000000000000004": { "builtin": { "name": "identity", "pricing": { "linear": { "base": 15, "word": 3 } } } },
+		"0000000000000000000000000000000000000005": { "builtin": { "name": "modexp", "activate_at": 0, "pricing": { "modexp": { "divisor": 20 } } } },
+		"0000000000000000000000000000000000000006": { "builtin": { "name": "alt_bn128_add", "activate_at": 0, "pricing": { "linear": { "base": 500, "word": 0 } } } },
+		"0000000000000000000000000000000000000007": { "builtin": { "name": "alt_bn128_mul", "activate_at": 0, "pricing": { "linear": { "base": 40000, "word": 0 } } } },
+		"0000000000000000000000000000000000000008": { "builtin": { "name": "alt_bn128_pairing", "activate_at": 0, "pricing": { "alt_bn128_pairing": { "base": 100000, "pair": 80000 } } } },
+
+        "8df9f63bddd6918590fd283969cf9f3bd14b1793": {
+            "balance": "888888000000000000000000"
+        }
+    }
+}
