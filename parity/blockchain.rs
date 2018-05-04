@@ -459,12 +459,10 @@ fn execute_import(cmd: ImportBlockchain) -> Result<(), String> {
 		}
 		DataFormat::Hex => {
 			for line in BufReader::new(instream).lines() {
-				let current_line = line!();
-		
 				let s = line.map_err(|_| "Error reading from the file/stream.")?;
 				let s = if first_read > 0 {from_utf8(&first_bytes).unwrap().to_owned() + &(s[..])} else {s};
 				first_read = 0;
-				let bytes = s.from_hex().map_err(|_| format!("{} Invalid hex in file/stream.", current_line) )?;
+				let bytes = s.from_hex().map_err(|_| format!("{} Invalid hex in file/stream.", line!() ) )?;
 				do_import(bytes)?;
 			}
 		}

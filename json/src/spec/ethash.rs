@@ -118,6 +118,19 @@ pub struct EthashParams {
 	#[serde(rename="mcip3DevContract")]
 	pub mcip3_dev_contract: Option<Address>,
 
+	/// See main EthashParams docs.
+	#[serde(rename="teip0Transition")]
+	pub teip0_transition: Option<Uint>,
+	/// See main EthashParams docs.
+	#[serde(rename="teip0MinerReward")]
+	pub teip0_miner_reward: Option<Uint>,
+	/// See main EthashParams docs.
+	#[serde(rename="teip0SSZReward")]
+	pub teip0_ssz_reward: Option<Uint>,
+	/// See main EthashParams docs.
+	#[serde(rename="teip0SSZAccount")]
+	pub teip0_ssz_account: Option<Address>,
+
 	/// EIP-649 transition block.
 	#[serde(rename="eip649Transition")]
 	pub eip649_transition: Option<Uint>,
@@ -250,6 +263,10 @@ mod tests {
 				mcip3_ubi_contract: None,
 				mcip3_dev_reward: None,
 				mcip3_dev_contract: None,
+				teip0_transition: None,
+				teip0_miner_reward: None,
+				teip0_ssz_reward: None,
+				teip0_ssz_account: None,
 				eip649_transition: None,
 				eip649_delay: None,
 				eip649_reward: None,
@@ -298,6 +315,10 @@ mod tests {
 				mcip3_ubi_contract: None,
 				mcip3_dev_reward: None,
 				mcip3_dev_contract: None,
+				teip0_transition: None,
+				teip0_miner_reward: None,
+				teip0_ssz_reward: None,
+				teip0_ssz_account: None,
 				eip649_transition: None,
 				eip649_delay: None,
 				eip649_reward: None,

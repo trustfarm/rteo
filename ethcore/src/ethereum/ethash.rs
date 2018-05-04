@@ -111,6 +111,14 @@ pub struct EthashParams {
 	pub mcip3_dev_reward: U256,
 	/// MCIP-3 contract address for the developer funds.
 	pub mcip3_dev_contract: Address,
+	/// Number of first block where TEIP-0 begins.
+	pub teip0_transition: u64,
+	/// TEIP-0 Block reward coin-base for miners.
+	pub teip0_miner_reward: U256,
+	/// TEIP-0 Block reward SSZ-base for Community Reserved fund.
+	pub teip0_ssz_reward: U256,
+	/// TEIP-0 Account for Community Reserved fund.
+	pub teip0_ssz_account: Address,
 	/// Block reward in base units.
 	pub block_reward: U256,
 	/// EIP-649 transition block.
@@ -147,6 +155,10 @@ impl From<ethjson::spec::EthashParams> for EthashParams {
 			mcip3_ubi_contract: p.mcip3_ubi_contract.map_or_else(Address::new, Into::into),
 			mcip3_dev_reward: p.mcip3_dev_reward.map_or(U256::from(0), Into::into),
 			mcip3_dev_contract: p.mcip3_dev_contract.map_or_else(Address::new, Into::into),
+			teip0_transition: p.teip0_transition.map_or(u64::max_value(), Into::into),
+			teip0_miner_reward: p.teip0_miner_reward.map_or_else(Default::default, Into::into),
+			teip0_ssz_reward: p.teip0_ssz_reward.map_or(U256::from(0), Into::into),
+			teip0_ssz_account: p.teip0_ssz_account.map_or_else(Address::new, Into::into),
 			block_reward: p.block_reward.map_or_else(Default::default, Into::into),
 			eip649_transition: p.eip649_transition.map_or(u64::max_value(), Into::into),
 			eip649_delay: p.eip649_delay.map_or(DEFAULT_EIP649_DELAY, Into::into),
@@ -245,6 +257,11 @@ impl Engine<EthereumMachine> for Arc<Ethash> {
 			self.ethash_params.block_reward
 		};
 
+		// Applies TEIP-0 rewards base. revert to origin from EIP-649 reward value.
+		let reward = if number >= self.ethash_params.teip0_transition { // Apply TEIP-0 NewConsensus
+			self.ethash_params.block_reward
+		}
+
 		// Applies ECIP-1017 eras.
 		let eras_rounds = self.ethash_params.ecip1017_era_rounds;
 		let (eras, reward) = ecip1017_eras_block_reward(eras_rounds, reward, number);
@@ -265,10 +282,19 @@ impl Engine<EthereumMachine> for Arc<Ethash> {
 			self.machine.add_balance(block, &author, &result_block_reward)?;
 			self.machine.add_balance(block, &ubi_contract, &ubi_reward)?;
 			self.machine.add_balance(block, &dev_contract, &dev_reward)?;
+		} else if number >= self.ethash_params.teip0_transition { 
+			// Apply TEIP-0 NewConsensus
+			let SSZ_account = self.ethash_params.teip0_ssz_account;
+			let SSZ_reward = self.ethash_params.teip0_ssz_reward;
+
+			self.machine.add_balance(block, &author, &result_block_reward)?;
+			self.machine.add_balance(block, &SSZ_account, &SSZ_reward)?;
+
+			trace!(target: "ethash", "TEIP-0 Block Reward={}, SSZAccount {} <== reward {}", result_block_reward, SSZ_account, SSZ_reward );
 		} else {
 			self.machine.add_balance(block, &author, &result_block_reward)?;
 		}
-
+			
 		// Bestow uncle rewards.
 		for u in LiveBlock::uncles(&*block) {
 			let uncle_author = u.author();
@@ -524,6 +550,10 @@ mod tests {
 			mcip3_ubi_contract: "0000000000000000000000000000000000000001".into(),
 			mcip3_dev_reward: 0.into(),
 			mcip3_dev_contract: "0000000000000000000000000000000000000001".into(),
+			teip0_transition: u64::max_value(),
+			teip0_miner_reward: 0.into(),
+			teip0_ssz_reward: 0.into(),
+			teip0_ssz_account: "0000000000000000000000000000000000000001".into(),
 			eip649_transition: u64::max_value(),
 			eip649_delay: 3_000_000,
 			eip649_reward: None,

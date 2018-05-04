@@ -1,5 +1,5 @@
 {
-    "name":"TrusETHreOrgin TestNet",
+    "name":"TrustETHreOrgin TestNet",
     "dataDir":"TEOcoin_test",
     "engine":{
         "Ethash":{
@@ -14,7 +14,8 @@
                 "eip161abcTransition":"0x0",
                 "eip161dTransition":"0x0",
                 "eip649Transition":"0x0",
-                "blockReward":"0x4563918244F40000",
+                "blockReward": "0x4563918244F40000",
+                "teip0MinerReward": "0x4563918244F40000",
                 "teip0Transition":"0x0",
                 "teip0SSZReward": "0x6f05b59d3b20000",
                 "teip0SSZAccount": "53fab079b2b282cb5d9ac97735b67098c1a14e64"
@@ -45,7 +46,7 @@
                 "mixHash": "0x0000000000000000000000000000000000000000000000000000000000000000"
             }
         },
-        "difficulty": "0x40000",
+        "difficulty": "0x4000000",
         "author": "0x0000000000000000000000000000000000000000",
         "timestamp": "0x00",
         "parentHash": "0x0000000000000000000000000000000000000000000000000000000000000000",
@@ -53,8 +54,7 @@
         "gasLimit": "0x1388"
     },
     "nodes":[
-        "enode://c9de732065ec6397ffc350561a61bf51167a17718af2209db6275e8f55ad7e8ed01c66c308d3ce0f8dbdd214311f108453cc87f60a910e6e81289ee53549d2b4@222.99.61.250:61637",
-        "enode: //c9de732065ec6397ffc350561a61bf51167a17718af2209db6275e8f55ad7e8ed01c66c308d3ce0f8dbdd214311f108453cc87f60a910e6e81289ee53549d2b4@192.168.0.31:30303"
+        "enode://c9de732065ec6397ffc350561a61bf51167a17718af2209db6275e8f55ad7e8ed01c66c308d3ce0f8dbdd214311f108453cc87f60a910e6e81289ee53549d2b4@222.99.61.250:61637"
     
     ],
     "accounts": {
@@ -68,7 +68,7 @@
 		"0000000000000000000000000000000000000008": { "builtin": { "name": "alt_bn128_pairing", "activate_at": 0, "pricing": { "alt_bn128_pairing": { "base": 100000, "pair": 80000 } } } },
 
         "8df9f63bddd6918590fd283969cf9f3bd14b1793": {
-            "balance": "888888000000000000000000"
+            "balance": "88888800000000000000000000"
         }
     }
 }

@@ -56,6 +56,8 @@ impl str::FromStr for SpecType {
 
 	fn from_str(s: &str) -> Result<Self, Self::Err> {
 		let spec = match s {
+			"teo" => SpecType::TeoMain,
+			"teotest" => SpecType::TeoTest,
 			"foundation" | "frontier" | "homestead" | "mainnet" => SpecType::Foundation,
 			"frontier-dogmatic" | "homestead-dogmatic" | "classic" => SpecType::Classic,
 			"morden" | "classic-testnet" => SpecType::Morden,
@@ -77,6 +79,8 @@ impl str::FromStr for SpecType {
 impl fmt::Display for SpecType {
 	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
 		f.write_str(match *self {
+			SpecType::TeoMain => "teo",
+			SpecType::TeoTest => "teotest",
 			SpecType::Foundation => "foundation",
 			SpecType::Morden => "morden",
 			SpecType::Ropsten => "ropsten",
@@ -98,6 +102,8 @@ impl SpecType {
 	pub fn spec<'a, T: Into<SpecParams<'a>>>(&self, params: T) -> Result<Spec, String> {
 		let params = params.into();
 		match *self {
+			SpecType::TeoMain => Ok(ethereum::new_teo(params)),
+			SpecType::TeoTest => Ok(ethereum::new_teotest(params)),
 			SpecType::Foundation => Ok(ethereum::new_foundation(params)),
 			SpecType::Morden => Ok(ethereum::new_morden(params)),
 			SpecType::Ropsten => Ok(ethereum::new_ropsten(params)),
