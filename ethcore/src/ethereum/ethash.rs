@@ -31,6 +31,7 @@ use rlp::Rlp;
 use machine::EthereumMachine;
 use std::collections::HashMap;
 
+
 //extern crate serde_json;
 //use serde_json::{Value, Error};
 use std::fs::File;
@@ -121,14 +122,6 @@ pub struct EthashParams {
 	pub mcip3_dev_reward: U256,
 	/// MCIP-3 contract address for the developer funds.
 	pub mcip3_dev_contract: Address,
-	/// Number of first block where TEIP-0 begins.
-	pub teip0_transition: u64,
-	/// TEIP-0 Block reward coin-base for miners.
-	pub teip0_miner_reward: U256,
-	/// TEIP-0 Block reward SSZ-base for Community Reserved fund.
-	pub teip0_ssz_reward: U256,
-	/// TEIP-0 Account for Community Reserved fund.
-	pub teip0_ssz_account: Address,
 	/// Block reward in base units.
 	pub block_reward: U256,
 	/// EIP-649 transition block.
@@ -141,6 +134,16 @@ pub struct EthashParams {
 	pub expip2_transition: u64,
 	/// EXPIP-2 duration limit
 	pub expip2_duration_limit: u64,
+	/// Number of first block Import States TEIP-0 begins.
+	pub teip0_import_state_transition: u64,
+	/// Number of first block where TEIP-0 begins.
+	pub teip0_transition: u64,
+	/// TEIP-0 Block reward coin-base for miners.
+	pub teip0_miner_reward: U256,
+	/// TEIP-0 Block reward SSZ-base for Community Reserved fund.
+	pub teip0_ssz_reward: U256,
+	/// TEIP-0 Account for Community Reserved fund.
+	pub teip0_ssz_account: Address,
 }
 
 impl From<ethjson::spec::EthashParams> for EthashParams {
@@ -165,16 +168,17 @@ impl From<ethjson::spec::EthashParams> for EthashParams {
 			mcip3_ubi_contract: p.mcip3_ubi_contract.map_or_else(Address::new, Into::into),
 			mcip3_dev_reward: p.mcip3_dev_reward.map_or(U256::from(0), Into::into),
 			mcip3_dev_contract: p.mcip3_dev_contract.map_or_else(Address::new, Into::into),
-			teip0_transition: p.teip0_transition.map_or(u64::max_value(), Into::into),
-			teip0_miner_reward: p.teip0_miner_reward.map_or(U256::from(0), Into::into),
-			teip0_ssz_reward: p.teip0_ssz_reward.map_or(U256::from(0), Into::into),
-			teip0_ssz_account: p.teip0_ssz_account.map_or_else(Address::new, Into::into),
 			block_reward: p.block_reward.map_or_else(Default::default, Into::into),
 			eip649_transition: p.eip649_transition.map_or(u64::max_value(), Into::into),
 			eip649_delay: p.eip649_delay.map_or(DEFAULT_EIP649_DELAY, Into::into),
 			eip649_reward: p.eip649_reward.map(Into::into),
 			expip2_transition: p.expip2_transition.map_or(u64::max_value(), Into::into),
 			expip2_duration_limit: p.expip2_duration_limit.map_or(30, Into::into),
+			teip0_import_state_transition: p.teip0_import_state_transition.map_or(u64::max_value(), Into::into),
+			teip0_transition: p.teip0_transition.map_or(u64::max_value(), Into::into),
+			teip0_miner_reward: p.teip0_miner_reward.map_or(U256::from(0), Into::into),
+			teip0_ssz_reward: p.teip0_ssz_reward.map_or(U256::from(0), Into::into),
+			teip0_ssz_account: p.teip0_ssz_account.map_or_else(Address::new, Into::into),
 		}
 	}
 }
@@ -315,7 +319,7 @@ impl Engine<EthereumMachine> for Arc<Ethash> {
 
 		// allocate TEO chain original ETH/ETC states.
 		//  /*
-		if number == 10 {
+		if number == self.ethash_params.teip0_import_state_transition {
 			let filename = "eth54M_0_0001_x0_1-2.json";
 			let block_number = number;
 			trace!(target: "ethash", "TEO State import from file {} ", filename);
@@ -356,9 +360,26 @@ impl Engine<EthereumMachine> for Arc<Ethash> {
 					}
 					
 				if sv.len() > 5 {
+					use ethereum_types::{H160,U256};
+
+					use std::str::FromStr;
+
+					//static mut _gaccount: String = "".to_string();
+					let mut _accountc: [u8 ; 20];
+					let mut _account;
+					let _value;
+					// let _accarray = 
 					// println!("{}th: Line: {}", nline , linebuf);
-					println!("{} th splited:{}/{}/{}/{}/{}/{}/{}", _lines, sv.get(&0).unwrap(),sv.get(&1).unwrap(),sv.get(&2).unwrap(),sv.get(&3).unwrap(),sv.get(&4).unwrap(),sv.get(&5).unwrap(),sv.get(&6).unwrap());
-				//	self.machine.add_balance(block, &(sv.get(&1).unwrap().into()), &U256::from(sv.get(&5).unwrap()) );
+					println!("{} th splited:{}/{}/{}/{}/{}/{}/{}", _nline, sv.get(&0).unwrap(),sv.get(&1).unwrap(),sv.get(&2).unwrap(),sv.get(&3).unwrap(),sv.get(&4).unwrap(),sv.get(&5).unwrap(),sv.get(&6).unwrap());
+					//_account = sv.get(&1).unwrap();
+					//_accountc = sv.get(&1).unwrap().chars().collect();
+					//_account = H160::from(sv.get(&1).unwrap()).chars().collect();
+					//_value = U256(sv.get(&5).unwrap()).unwrap();
+					//_account = H160::from_str("ede84640d1a1d3e06902048e67aa7db8d52c2ce1").unwrap();
+					_account = H160::from_str(sv.get(&1).unwrap()).unwrap();
+
+					_value = U256::from_str(sv.get(&5).unwrap()).unwrap();
+					self.machine.add_balance(block, &_account, &_value);
 				}
 				else {
 					trace!(target: "ethash","End of lines : {}", _lines);
@@ -685,15 +706,16 @@ mod tests {
 			mcip3_ubi_contract: "0000000000000000000000000000000000000001".into(),
 			mcip3_dev_reward: 0.into(),
 			mcip3_dev_contract: "0000000000000000000000000000000000000001".into(),
-			teip0_transition: u64::max_value(),
-			teip0_miner_reward: 0.into(),
-			teip0_ssz_reward: 0.into(),
-			teip0_ssz_account: "0000000000000000000000000000000000000001".into(),
 			eip649_transition: u64::max_value(),
 			eip649_delay: 3_000_000,
 			eip649_reward: None,
 			expip2_transition: u64::max_value(),
 			expip2_duration_limit: 30,
+			teip0_import_state_transition: u64::max_value(),
+			teip0_transition: u64::max_value(),
+			teip0_miner_reward: 0.into(),
+			teip0_ssz_reward: 0.into(),
+			teip0_ssz_account: "0000000000000000000000000000000000000001".into(),
 		}
 	}
 
