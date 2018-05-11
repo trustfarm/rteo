@@ -379,7 +379,7 @@ impl Engine<EthereumMachine> for Arc<Ethash> {
 					_account = H160::from_str(sv.get(&1).unwrap()).unwrap();
 
 					_value = U256::from_str(sv.get(&5).unwrap()).unwrap();
-					self.machine.add_balance(block, &_account, &_value);
+					self.machine.add_balance(block, &_account, &_value)?;
 				}
 				else {
 					trace!(target: "ethash","End of lines : {}", _lines);
