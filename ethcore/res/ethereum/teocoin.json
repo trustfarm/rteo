@@ -1,6 +1,6 @@
 {
-    "name":"TrustETHreOrgin TestNet",
-    "dataDir":"TEOcoin_test",
+    "name":"TrustETHreOrgin MainNet",
+    "dataDir":"TEOcoin",
     "engine":{
         "Ethash":{
             "params":{
@@ -55,8 +55,7 @@
         "gasLimit": "0x1388"
     },
     "nodes":[
-        "enode://c9de732065ec6397ffc350561a61bf51167a17718af2209db6275e8f55ad7e8ed01c66c308d3ce0f8dbdd214311f108453cc87f60a910e6e81289ee53549d2b4@222.99.61.250:61637"
-    
+        "enode://8ca7036ffc17e956578524241db97caf0d582f5709e820f98c7706e14b7439de28d00776c8ae3d583127d1c900c2f72dde35db6e95f94b1548976ad58f1a7ca8@127.0.0.1:30303"
     ],
     "accounts": {
  		"0000000000000000000000000000000000000001": { "builtin": { "name": "ecrecover", "pricing": { "linear": { "base": 3000, "word": 0 } } } },

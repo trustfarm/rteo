@@ -41,6 +41,8 @@ pub enum SpecType {
 	Ellaism,
 	Easthub,
 	Social,
+	TeoMain,
+	TeoTest,
 	Dev,
 	Custom(String),
 }
@@ -102,7 +104,7 @@ impl SpecType {
 	pub fn spec<'a, T: Into<SpecParams<'a>>>(&self, params: T) -> Result<Spec, String> {
 		let params = params.into();
 		match *self {
-			SpecType::TeoMain => Ok(ethereum::new_teo(params)),
+			SpecType::TeoMain => Ok(ethereum::new_teomain(params)),
 			SpecType::TeoTest => Ok(ethereum::new_teotest(params)),
 			SpecType::Foundation => Ok(ethereum::new_foundation(params)),
 			SpecType::Morden => Ok(ethereum::new_morden(params)),
@@ -128,6 +130,7 @@ impl SpecType {
 			SpecType::Classic => Some("classic".to_owned()),
 			SpecType::Expanse => Some("expanse".to_owned()),
 			SpecType::Musicoin => Some("musicoin".to_owned()),
+			SpecType::TeoMain => Some("teo".to_owned()),
 			_ => None,
 		}
 	}
@@ -355,6 +358,8 @@ mod tests {
 		assert_eq!(SpecType::Olympic, "olympic".parse().unwrap());
 		assert_eq!(SpecType::Classic, "classic".parse().unwrap());
 		assert_eq!(SpecType::Morden, "classic-testnet".parse().unwrap());
+		assert_eq!(SpecType::TeoMain, "teo".parse().unwrap());
+		assert_eq!(SpecType::TeoTest, "teotest".parse().unwrap());
 	}
 
 	#[test]

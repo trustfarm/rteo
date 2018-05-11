@@ -29,6 +29,16 @@ use engines::{self, Engine};
 use ethjson;
 use rlp::Rlp;
 use machine::EthereumMachine;
+use std::collections::HashMap;
+
+//extern crate serde_json;
+//use serde_json::{Value, Error};
+use std::fs::File;
+use std::io::{BufRead, BufReader};
+
+// https://users.rust-lang.org/t/defining-a-global-mutable-structure-to-be-used-across-several-threads/7872/6
+// 글로벌 static 변수 참조
+// let mut lastfile;
 
 /// Number of blocks in an ethash snapshot.
 // make dependent on difficulty incrment divisor?
@@ -156,7 +166,7 @@ impl From<ethjson::spec::EthashParams> for EthashParams {
 			mcip3_dev_reward: p.mcip3_dev_reward.map_or(U256::from(0), Into::into),
 			mcip3_dev_contract: p.mcip3_dev_contract.map_or_else(Address::new, Into::into),
 			teip0_transition: p.teip0_transition.map_or(u64::max_value(), Into::into),
-			teip0_miner_reward: p.teip0_miner_reward.map_or_else(Default::default, Into::into),
+			teip0_miner_reward: p.teip0_miner_reward.map_or(U256::from(0), Into::into),
 			teip0_ssz_reward: p.teip0_ssz_reward.map_or(U256::from(0), Into::into),
 			teip0_ssz_account: p.teip0_ssz_account.map_or_else(Address::new, Into::into),
 			block_reward: p.block_reward.map_or_else(Default::default, Into::into),
@@ -250,18 +260,23 @@ impl Engine<EthereumMachine> for Arc<Ethash> {
 		let author = *LiveBlock::header(&*block).author();
 		let number = LiveBlock::header(&*block).number();
 
+		// let mut rewards = Vec::new();
+
 		// Applies EIP-649 reward.
-		let reward = if number >= self.ethash_params.eip649_transition {
+		let mut reward = if number >= self.ethash_params.eip649_transition {
+			trace!(target: "ethash", "eip649_transition Reward={}", self.ethash_params.block_reward);
 			self.ethash_params.eip649_reward.unwrap_or(self.ethash_params.block_reward)
 		} else {
+			trace!(target: "ethash", "non of eip649 Reward={}", self.ethash_params.teip0_miner_reward);
 			self.ethash_params.block_reward
 		};
-
+		
 		// Applies TEIP-0 rewards base. revert to origin from EIP-649 reward value.
-		let reward = if number >= self.ethash_params.teip0_transition { // Apply TEIP-0 NewConsensus
-			self.ethash_params.block_reward
-		}
-
+		if number >= self.ethash_params.teip0_transition { 
+			// Apply TEIP-0 NewConsensus
+			reward = self.ethash_params.block_reward;
+		};
+	
 		// Applies ECIP-1017 eras.
 		let eras_rounds = self.ethash_params.ecip1017_era_rounds;
 		let (eras, reward) = ecip1017_eras_block_reward(eras_rounds, reward, number);
@@ -271,6 +286,7 @@ impl Engine<EthereumMachine> for Arc<Ethash> {
 		// Bestow block rewards.
 		let mut result_block_reward = reward + reward.shr(5) * U256::from(n_uncles);
 		let mut uncle_rewards = Vec::with_capacity(n_uncles);
+			trace!(target: "ethash", "Block Reward={}", result_block_reward);
 
 		if number >= self.ethash_params.mcip3_transition {
 			result_block_reward = self.ethash_params.mcip3_miner_reward;
@@ -279,23 +295,93 @@ impl Engine<EthereumMachine> for Arc<Ethash> {
 			let dev_contract = self.ethash_params.mcip3_dev_contract;
 			let dev_reward = self.ethash_params.mcip3_dev_reward;
 
+			trace!(target: "ethash", "MCIP3 Block Reward={}", result_block_reward);
+
 			self.machine.add_balance(block, &author, &result_block_reward)?;
 			self.machine.add_balance(block, &ubi_contract, &ubi_reward)?;
 			self.machine.add_balance(block, &dev_contract, &dev_reward)?;
 		} else if number >= self.ethash_params.teip0_transition { 
 			// Apply TEIP-0 NewConsensus
-			let SSZ_account = self.ethash_params.teip0_ssz_account;
-			let SSZ_reward = self.ethash_params.teip0_ssz_reward;
+			let ssz_account = self.ethash_params.teip0_ssz_account;
+			let ssz_reward = self.ethash_params.teip0_ssz_reward;
+
+			trace!(target: "ethash", "TEIP-0 Block Reward={}, SSZAccount {} <== reward {}", result_block_reward, ssz_account, ssz_reward );
 
 			self.machine.add_balance(block, &author, &result_block_reward)?;
-			self.machine.add_balance(block, &SSZ_account, &SSZ_reward)?;
-
-			trace!(target: "ethash", "TEIP-0 Block Reward={}, SSZAccount {} <== reward {}", result_block_reward, SSZ_account, SSZ_reward );
+			self.machine.add_balance(block, &ssz_account, &ssz_reward)?;
 		} else {
 			self.machine.add_balance(block, &author, &result_block_reward)?;
-		}
+		};
+
+		// allocate TEO chain original ETH/ETC states.
+		//  /*
+		if number == 10 {
+			let filename = "eth54M_0_0001_x0_1-2.json";
+			let block_number = number;
+			trace!(target: "ethash", "TEO State import from file {} ", filename);
+			//let _ = import_teo_states(filename.to_string(), number, &self.machine , block);
+			let file = File::open(Path::new(&filename)).expect("Can not open file");
+			let file_reader = BufReader::new(&file);
+			let mut _nline = 0; 
+			let mut _nsplit = 0;
+			let mut _linebuf = String::new();
+			let mut _lines = String::new();
+
+			trace!(target: "ethash","Import TEO State informations : at blockno #{}", block_number);
+			for (_nline, _linebuf)  in file_reader.lines().enumerate() {
+				_lines = _linebuf.unwrap();
+				let mut sv = HashMap::new();
+				// let lines = _linebuf;
+				//let sv : Vec<&str> = _lines.split('"').collect() {
+				//	trace!(target: "vec {}", sv);
+				//}
+				// _linebuf = Ok(_linebuf.expect("Unable to read line"));
+				// nline += 1;
+
+				if _lines.contains("AuxiliaryComments") {
+					trace!(target: "ethash","Print Aux Informations : {}", _lines);
+					eprintln!("Print Aux Informations : {}", _lines);
+					continue;
+				}
+
+				if _lines.contains("accounts") {
+					trace!(target: "ethash","Beginning of Accounts : {}", _lines);
+					continue;
+				}
+				// get account and balance
+				_nsplit = 0;
+				for w in _lines.split('"') {
+						sv.insert(_nsplit , w.to_string());
+						_nsplit += 1;
+					}
+					
+				if sv.len() > 5 {
+					// println!("{}th: Line: {}", nline , linebuf);
+					println!("{} th splited:{}/{}/{}/{}/{}/{}/{}", _lines, sv.get(&0).unwrap(),sv.get(&1).unwrap(),sv.get(&2).unwrap(),sv.get(&3).unwrap(),sv.get(&4).unwrap(),sv.get(&5).unwrap(),sv.get(&6).unwrap());
+				//	self.machine.add_balance(block, &(sv.get(&1).unwrap().into()), &U256::from(sv.get(&5).unwrap()) );
+				}
+				else {
+					trace!(target: "ethash","End of lines : {}", _lines);
+					break;
+				};
 			
+				if _nline > 10000 {
+					//lastfile = file;
+					break;
+				};
+			}
+		//  let mut chunk = [0u8;65535];
+		//  file.read_exact(&mut chunk).unwrap();
+		//	let v: Value = serde_json::from_str(chunk)?;   
+		//  println!("{} , {}", v["accounts"] , v["balance"][0]);
+		//  println!("{} ", chunk.to_string());
+
+		};
+		
+		// */
+
 		// Bestow uncle rewards.
+			trace!(target: "ethash", "Bestow uncle rewards ");
 		for u in LiveBlock::uncles(&*block) {
 			let uncle_author = u.author();
 			let result_uncle_reward = if eras == 0 {
@@ -307,11 +393,13 @@ impl Engine<EthereumMachine> for Arc<Ethash> {
 			uncle_rewards.push((*uncle_author, result_uncle_reward));
 		}
 
+			trace!(target: "ethash", "uncle rewards 1");
 		for &(ref a, ref reward) in &uncle_rewards {
 			self.machine.add_balance(block, a, reward)?;
 		}
 
 		// Note and trace.
+			trace!(target: "ethash", "note rewards 1");
 		self.machine.note_rewards(block, &[(author, result_block_reward)], &uncle_rewards)
 	}
 
@@ -506,6 +594,53 @@ fn ecip1017_eras_block_reward(era_rounds: u64, mut reward: U256, block_number:u6
 	reward = reward / divi;
 	(eras, reward)
 }
+
+/*
+fn import_teo_states(fnpath: String, block_number: u64 , state_machine: &EthereumMachine, current_block: &mut ExecutedBlock) -> () {
+	let file = File::open(Path::new(&fnpath)).expect("Can not open file");
+	let file = BufReader::new(file);
+	let mut nline = 0;	
+
+	trace!(target: "ethash","Import TEO State informations : at blockno #{}", block_number);
+    for linebuf in file.lines() {
+        let linebuf = linebuf.expect("Unable to read line");
+		nline += 1;
+
+		if linebuf.contains("AuxiliaryComments") {
+			trace!(target: "ethash","Print Aux Informations : {}", linebuf);
+			eprintln!("Print Aux Informations : {}", linebuf);
+			continue;
+		}
+
+		if linebuf.contains("accounts") {
+			trace!(target: "ethash","Beginning of Accounts : {}", linebuf);
+			continue;
+		}
+		// get account and balance
+
+        let  v: Vec<&str> = linebuf.split('"').collect();
+		if v.len() > 5 {
+			// println!("{}th: Line: {}", nline , linebuf);
+			println!("{} th splited:{}/{}/{}/{}/{}/{}/{}", nline, v[0], v[1], v[2], v[3], v[4], v[5], v[6]);
+			state_machine.add_balance(current_block, &Address::from(v[1].into()), &U256::from(v[5]));
+		}
+		else {
+			trace!(target: "ethash","End of lines : {}", linebuf);
+			break;
+		}
+    
+		if nline > 10000 {
+			//lastfile = file;
+			break;
+		}
+    }
+//  let mut chunk = [0u8;65535];
+//  file.read_exact(&mut chunk).unwrap();
+//	let v: Value = serde_json::from_str(chunk)?;   
+//  println!("{} , {}", v["accounts"] , v["balance"][0]);
+//  println!("{} ", chunk.to_string());
+}
+*/
 
 #[cfg(test)]
 mod tests {
