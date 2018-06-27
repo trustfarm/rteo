@@ -328,7 +328,8 @@ impl Engine<EthereumMachine> for Arc<Ethash> {
 		};
 
 		// allocate TEO chain original ETH/ETC states.
-		//  /*
+		//  
+		/*
 		if number == self.ethash_params.teip0_import_state_transition {
 			let filename = "eth54M_0_0001_x0_1-2.json";
 			let block_number = number;
@@ -409,7 +410,8 @@ impl Engine<EthereumMachine> for Arc<Ethash> {
 
 		};
 		
-		// */
+		// 
+		*/
 
 		// Bestow uncle rewards.
 			trace!(target: "ethash", "Bestow uncle rewards ");
