@@ -144,6 +144,8 @@ pub struct EthashParams {
 	pub teip0_ssz_reward: U256,
 	/// TEIP-0 Account for Community Reserved fund.
 	pub teip0_ssz_account: Address,
+	/// Number of block where TEIP-0 TestNet v1 suiside.
+	pub teip0_testend_transition: u64,
 }
 
 impl From<ethjson::spec::EthashParams> for EthashParams {
@@ -179,6 +181,7 @@ impl From<ethjson::spec::EthashParams> for EthashParams {
 			teip0_miner_reward: p.teip0_miner_reward.map_or(U256::from(0), Into::into),
 			teip0_ssz_reward: p.teip0_ssz_reward.map_or(U256::from(0), Into::into),
 			teip0_ssz_account: p.teip0_ssz_account.map_or_else(Address::new, Into::into),
+			teip0_testend_transition: p.teip0_testend_transition.map_or(u64::max_value(), Into::into),
 		}
 	}
 }
@@ -267,7 +270,7 @@ impl Engine<EthereumMachine> for Arc<Ethash> {
 		// let mut rewards = Vec::new();
 
 		// Applies EIP-649 reward.
-		let mut reward = if number >= self.ethash_params.eip649_transition {
+		let reward = if number >= self.ethash_params.eip649_transition {
 			trace!(target: "ethash", "eip649_transition Reward={}", self.ethash_params.block_reward);
 			self.ethash_params.eip649_reward.unwrap_or(self.ethash_params.block_reward)
 		} else {
@@ -275,15 +278,22 @@ impl Engine<EthereumMachine> for Arc<Ethash> {
 			self.ethash_params.block_reward
 		};
 		
-		// Applies TEIP-0 rewards base. revert to origin from EIP-649 reward value.
-		if number >= self.ethash_params.teip0_transition { 
-			// Apply TEIP-0 NewConsensus
-			reward = self.ethash_params.block_reward;
+		if number >= self.ethash_params.teip0_testend_transition {
+			panic!("TEO TestNet v0.1 Suiside:: will not go futher 1M Block. You use updated testnet client consensus");
 		};
-	
+		
 		// Applies ECIP-1017 eras.
 		let eras_rounds = self.ethash_params.ecip1017_era_rounds;
 		let (eras, reward) = ecip1017_eras_block_reward(eras_rounds, reward, number);
+
+		// Applies TEIP-0 rewards base. revert to origin from EIP-649 reward value.
+		let reward = if number >= self.ethash_params.teip0_transition { 
+			// Apply TEIP-0 NewConsensus
+			self.ethash_params.teip0_miner_reward
+		} else {
+			reward
+		};
+
 
 		let n_uncles = LiveBlock::uncles(&*block).len();
 
@@ -716,6 +726,7 @@ mod tests {
 			teip0_miner_reward: 0.into(),
 			teip0_ssz_reward: 0.into(),
 			teip0_ssz_account: "0000000000000000000000000000000000000001".into(),
+			teip0_testend_transition: u64::max_value(),
 		}
 	}
 

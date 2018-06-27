@@ -20,7 +20,8 @@
                 "teip0MinerReward": "0x4563918244F40000",
                 "teip0Transition":"0x0",
                 "teip0SSZReward": "0x6f05b59d3b20000",
-                "teip0SSZAccount": "53fab079b2b282cb5d9ac97735b67098c1a14e64"
+                "teip0SSZAccount": "53fab079b2b282cb5d9ac97735b67098c1a14e64",
+                "teip0testEndTransition": "0xF4240"
             }
         }
     },
