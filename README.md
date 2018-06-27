@@ -1,3 +1,10 @@
+# TEO (TrustETHreOrigin) PoW chain.
+## You can refer what is TEO  and what is TAO go to this URL [[TEO Materials and Documents|https://github.com/trustfarm/teo-material]]
+
+#
+#
+#
+
 # Parity - fast, light, and robust Ethereum client
 
 ## [» Download the latest release «](https://github.com/paritytech/parity/releases/latest)
