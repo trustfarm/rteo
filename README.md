@@ -1,5 +1,5 @@
 # TEO (TrustETHreOrigin) PoW chain.
-## You can refer what is TEO  and what is TAO go to this URL [[TEO Materials and Documents|https://github.com/trustfarm/teo-material]]
+## You can refer what is TEO  and what is TAO go to this URL [TEO Materials and Documents|https://github.com/trustfarm/teo-material ]
 
 #
 #
