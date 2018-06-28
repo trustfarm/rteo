@@ -2,12 +2,21 @@
 ## You can refer what is TEO  and what is TAO go to this URL [TEO Materials and Documents|https://github.com/trustfarm/teo-material ]
 
 #
+#  Using Binary download
+#  
+## [» Download the rteo windows release rteo.win10.zip «](https://github.com/trustfarm/rteo/raw/master/target/release/rteo.win10.zip) 
+## [» Download the rteo Linux   release rteo.linux.zip «](https://github.com/trustfarm/rteo/raw/master/target/release/rteo.linux.zip) 
 #
-#
+#  After download binary and unzip it
+#  run examples
+#  rteo --chain=teotest
+# 
 
-# Parity - fast, light, and robust Ethereum client
+----------------------
 
-## [» Download the latest release «](https://github.com/paritytech/parity/releases/latest)
+# Original Parity - fast, light, and robust Ethereum client
+
+[» Download the latest release «](https://github.com/paritytech/parity/releases/latest)
 
 [![build status](https://gitlab.parity.io/parity/parity/badges/master/build.svg)](https://gitlab.parity.io/parity/parity/commits/master)
 [![codecov](https://codecov.io/gh/paritytech/parity/branch/master/graph/badge.svg)](https://codecov.io/gh/paritytech/parity)
