@@ -32,6 +32,7 @@
         "maximumExtraDataSize":"0x20",
         "minGasLimit":"0x1388",
         "networkID":"0x8282",
+        "chainID": "0x8282",
         "maxCodeSize": "0x6000",
         "maxCodeSizeTransition": "0x0",
         "eip140Transition": "0x0",
